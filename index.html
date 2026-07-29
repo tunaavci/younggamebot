@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Telegram Web App - Çizim Canvas'ı</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0b0d14;
+      --surface-dark: #161926;
+      --surface-card: #1f2336;
+      --surface-border: #2c3149;
+      --primary: #6366f1;
+      --primary-hover: #4f46e5;
+      --accent-red: #ef4444;
+      --accent-green: #10b981;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --radius-lg: 16px;
+      --radius-md: 12px;
+      --radius-sm: 8px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      height: 100vh;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      touch-action: none;
+    }
+
+    /* Header */
+    .app-header {
+      background-color: var(--surface-dark);
+      border-bottom: 1px solid var(--surface-border);
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      z-index: 10;
+    }
+
+    .word-badge {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+
+    .word-label {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+    }
+
+    .word-target {
+      font-size: 17px;
+      font-weight: 800;
+      color: #ffffff;
+      background: linear-gradient(135deg, #a5b4fc 0%, #6366f1 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .timer-container {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--surface-border);
+      padding: 5px 12px;
+      border-radius: 999px;
+    }
+
+    .timer-icon {
+      width: 15px;
+      height: 15px;
+      fill: none;
+      stroke: #f59e0b;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .timer-text {
+      font-size: 14px;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      color: #f59e0b;
+    }
+
+    .timer-container.warning {
+      border-color: rgba(239, 68, 68, 0.4);
+      background: rgba(239, 68, 68, 0.1);
+      animation: pulse-warning 1s infinite alternate;
+    }
+
+    .timer-container.warning .timer-text,
+    .timer-container.warning .timer-icon {
+      color: var(--accent-red);
+      stroke: var(--accent-red);
+    }
+
+    @keyframes pulse-warning {
+      from { opacity: 1; }
+      to { opacity: 0.6; }
+    }
+
+    /* Canvas Area */
+    .canvas-wrapper {
+      flex: 1;
+      position: relative;
+      margin: 8px 12px;
+      background: #ffffff;
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+      cursor: crosshair;
+    }
+
+    .canvas-mode-tag {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(15, 17, 26, 0.75);
+      backdrop-filter: blur(8px);
+      border: 1px solid var(--surface-border);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 999px;
+      pointer-events: none;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    /* Toolbar Panel */
+    .toolbar-container {
+      background-color: var(--surface-dark);
+      border-top: 1px solid var(--surface-border);
+      padding: 10px 14px;
+      padding-bottom: max(10px, env(safe-area-inset-bottom));
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .toolbar-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* Tools Bar (Brush, Bucket, Eraser) */
+    .tools-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(0, 0, 0, 0.25);
+      padding: 4px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--surface-border);
+    }
+
+    .tool-btn {
+      height: 36px;
+      padding: 0 12px;
+      border-radius: var(--radius-sm);
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+
+    .tool-btn.active {
+      background: var(--primary);
+      color: #ffffff;
+      box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4);
+    }
+
+    /* Size Slider Box */
+    .size-control-box {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0, 0, 0, 0.25);
+      padding: 4px 12px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--surface-border);
+    }
+
+    .size-preview-dot {
+      width: 24px;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .size-preview-dot::before {
+      content: '';
+      display: block;
+      background-color: var(--text-main);
+      border-radius: 50%;
+      width: var(--dot-size, 6px);
+      height: var(--dot-size, 6px);
+      transition: width 0.1s ease, height 0.1s ease;
+    }
+
+    .size-slider {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 6px;
+      border-radius: 3px;
+      background: var(--surface-border);
+      outline: none;
+    }
+
+    .size-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--primary);
+      cursor: pointer;
+      box-shadow: 0 0 6px rgba(99, 102, 241, 0.6);
+      border: 2px solid #ffffff;
+    }
+
+    .size-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      min-width: 26px;
+      text-align: right;
+    }
+
+    /* Extended Color Palette */
+    .color-palette-scroll {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      overflow-x: auto;
+      padding: 4px 2px;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+      width: 100%;
+    }
+
+    .color-palette-scroll::-webkit-scrollbar {
+      display: none;
+    }
+
+    .color-btn {
+      width: 30px;
+      height: 30px;
+      min-width: 30px;
+      border-radius: 50%;
+      border: 2px solid transparent;
+      cursor: pointer;
+      position: relative;
+      transition: transform 0.15s ease, border-color 0.15s ease;
+      outline: none;
+    }
+
+    .color-btn.active {
+      border-color: #ffffff;
+      transform: scale(1.15);
+      box-shadow: 0 0 8px rgba(255, 255, 255, 0.4);
+    }
+
+    .custom-color-wrapper {
+      position: relative;
+      width: 30px;
+      height: 30px;
+      min-width: 30px;
+      border-radius: 50%;
+      background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
+      padding: 2px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .custom-color-wrapper input[type="color"] {
+      position: absolute;
+      opacity: 0;
+      width: 100%;
+      height: 100%;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+    }
+
+    .custom-color-inner {
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background-color: var(--custom-color-val, #6366f1);
+      border: 2px solid #ffffff;
+    }
+
+    /* Action Buttons */
+    .actions-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+    }
+
+    .btn {
+      height: 42px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--surface-border);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+      outline: none;
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-main);
+      flex: 1;
+    }
+
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.1);
+      border-color: rgba(239, 68, 68, 0.3);
+      color: var(--accent-red);
+      flex: 1;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+      border: none;
+      color: #ffffff;
+      flex: 2;
+      box-shadow: 0 4px 14px rgba(99, 102, 241, 0.4);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="word-badge">
+      <span class="word-label">Çizmen Gereken</span>
+      <span class="word-target" id="targetWord">Ejderha</span>
+    </div>
+    
+    <div class="timer-container" id="timerBox">
+      <svg class="timer-icon" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10"></circle>
+        <polyline points="12 6 12 12 16 14"></polyline>
+      </svg>
+      <span class="timer-text" id="timerValue">60s</span>
+    </div>
+  </header>
+
+  <!-- Canvas Container -->
+  <main class="canvas-wrapper" id="canvasWrapper">
+    <div class="canvas-mode-tag" id="modeTag">
+      <span id="modeIcon">🖌️</span>
+      <span id="modeName">Fırça Mode</span>
+    </div>
+    <canvas id="drawingCanvas"></canvas>
+  </main>
+
+  <!-- Toolbar -->
+  <footer class="toolbar-container">
+    <!-- Row 1: Tool Selection & Brush Size Slider -->
+    <div class="toolbar-row">
+      <div class="tools-group" id="toolsGroup">
+        <button class="tool-btn active" data-tool="brush" title="Fırça">
+          <span class="tool-icon">🖌️</span> Fırça
+        </button>
+        <button class="tool-btn" data-tool="bucket" title="Boya Kovası">
+          <span class="tool-icon">🪣</span> Kova
+        </button>
+        <button class="tool-btn" data-tool="eraser" title="Silgi">
+          <span class="tool-icon">🧹</span> Silgi
+        </button>
+      </div>
+
+      <!-- Size Slider -->
+      <div class="size-control-box">
+        <div class="size-preview-dot" id="sizeDot"></div>
+        <input type="range" id="sizeRange" class="size-slider" min="1" max="50" value="6">
+        <span class="size-label" id="sizeLabel">6px</span>
+      </div>
+    </div>
+
+    <!-- Row 2: Extended Color Palette & Spectrum Picker -->
+    <div class="toolbar-row">
+      <div class="color-palette-scroll" id="colorPalette">
+        <button class="color-btn active" data-color="#000000" style="background-color: #000000;" title="Siyah"></button>
+        <button class="color-btn" data-color="#4b5563" style="background-color: #4b5563;" title="Koyu Gri"></button>
+        <button class="color-btn" data-color="#ffffff" style="background-color: #ffffff; border: 1px solid #d1d5db;" title="Beyaz"></button>
+        <button class="color-btn" data-color="#ef4444" style="background-color: #ef4444;" title="Kırmızı"></button>
+        <button class="color-btn" data-color="#f97316" style="background-color: #f97316;" title="Turuncu"></button>
+        <button class="color-btn" data-color="#eab308" style="background-color: #eab308;" title="Sarı"></button>
+        <button class="color-btn" data-color="#22c55e" style="background-color: #22c55e;" title="Yeşil"></button>
+        <button class="color-btn" data-color="#06b6d4" style="background-color: #06b6d4;" title="Turkuaz"></button>
+        <button class="color-btn" data-color="#3b82f6" style="background-color: #3b82f6;" title="Mavi"></button>
+        <button class="color-btn" data-color="#a855f7" style="background-color: #a855f7;" title="Mor"></button>
+        <button class="color-btn" data-color="#ec4899" style="background-color: #ec4899;" title="Pembe"></button>
+        <button class="color-btn" data-color="#78350f" style="background-color: #78350f;" title="Kahverengi"></button>
+
+        <div class="custom-color-wrapper" title="Özel Renk Seç">
+          <input type="color" id="customColorPicker" value="#6366f1">
+          <div class="custom-color-inner" id="customColorInner"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 3: Action Buttons -->
+    <div class="toolbar-row">
+      <div class="actions-group">
+        <button class="btn btn-secondary" id="undoBtn">
+          <svg class="btn-svg" viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"></path><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"></path></svg>
+          Geri Al
+        </button>
+        
+        <button class="btn btn-danger" id="clearBtn">
+          <svg class="btn-svg" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+          Temizle
+        </button>
+
+        <button class="btn btn-primary" id="submitBtn">
+          <svg class="btn-svg" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+          Gönder
+        </button>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // --- Telegram Web App Setup ---
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      tg.expand();
+      tg.ready();
+    }
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const targetWord = urlParams.get('word') || 'Ejderha';
+    const chatId = urlParams.get('chatId') || '';
+    const userId = urlParams.get('userId') || (tg?.initDataUnsafe?.user?.id || '');
+
+    document.getElementById('targetWord').textContent = targetWord;
+
+    const canvas = document.getElementById('drawingCanvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const wrapper = document.getElementById('canvasWrapper');
+    const timerValue = document.getElementById('timerValue');
+    const timerBox = document.getElementById('timerBox');
+    const undoBtn = document.getElementById('undoBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const submitBtn = document.getElementById('submitBtn');
+
+    const sizeRange = document.getElementById('sizeRange');
+    const sizeLabel = document.getElementById('sizeLabel');
+    const sizeDot = document.getElementById('sizeDot');
+    const customColorPicker = document.getElementById('customColorPicker');
+    const customColorInner = document.getElementById('customColorInner');
+    const modeIcon = document.getElementById('modeIcon');
+    const modeName = document.getElementById('modeName');
+
+    let isDrawing = false;
+    let activeTool = 'brush';
+    let currentColor = '#000000';
+    let currentSize = 6;
+    let historyStack = [];
+    const MAX_HISTORY = 25;
+    let remainingTime = 60;
+    let timerInterval = null;
+    let isSubmitted = false;
+
+    function initCanvas() {
+      const rect = wrapper.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      let tempImage = canvas.width > 0 && canvas.height > 0 ? ctx.getImageData(0, 0, canvas.width, canvas.height) : null;
+
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, rect.width, rect.height);
+
+      if (tempImage) ctx.putImageData(tempImage, 0, 0);
+      else saveState();
+
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+    }
+
+    function saveState() {
+      if (historyStack.length >= MAX_HISTORY) historyStack.shift();
+      historyStack.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+    }
+
+    function undo() {
+      if (historyStack.length > 1) {
+        historyStack.pop();
+        ctx.putImageData(historyStack[historyStack.length - 1], 0, 0);
+      }
+    }
+
+    function clearCanvas() {
+      const rect = wrapper.getBoundingClientRect();
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, rect.width, rect.height);
+      saveState();
+    }
+
+    function hexToRgba(hex) {
+      let c = hex.replace('#', '');
+      if (c.length === 3) c = c.split('').map(x => x + x).join('');
+      const num = parseInt(c, 16);
+      return [(num >> 16) & 255, (num >> 8) & 255, num & 255, 255];
+    }
+
+    function performFloodFill(startX, startY, fillHex) {
+      const dpr = window.devicePixelRatio || 1;
+      const x = Math.floor(startX * dpr);
+      const y = Math.floor(startY * dpr);
+      const w = canvas.width;
+      const h = canvas.height;
+
+      if (x < 0 || x >= w || y < 0 || y >= h) return;
+
+      const imgData = ctx.getImageData(0, 0, w, h);
+      const data = imgData.data;
+
+      const targetColor = getPixelColor(data, x, y, w);
+      const fillColor = hexToRgba(fillHex);
+
+      if (colorsMatch(targetColor, fillColor, 10)) return;
+
+      const queue = [x, y];
+      const visited = new Uint8Array(w * h);
+
+      while (queue.length > 0) {
+        const currY = queue.pop();
+        const currX = queue.pop();
+
+        const idx = (currY * w + currX);
+        if (visited[idx]) continue;
+
+        let left = currX;
+        while (left > 0 && colorsMatch(getPixelColor(data, left - 1, currY, w), targetColor, 30)) left--;
+
+        let right = currX;
+        while (right < w - 1 && colorsMatch(getPixelColor(data, right + 1, currY, w), targetColor, 30)) right++;
+
+        for (let i = left; i <= right; i++) {
+          const pixelIdx = currY * w + i;
+          visited[pixelIdx] = 1;
+          setPixelColor(data, i, currY, w, fillColor);
+
+          if (currY > 0 && !visited[(currY - 1) * w + i] && colorsMatch(getPixelColor(data, i, currY - 1, w), targetColor, 30)) queue.push(i, currY - 1);
+          if (currY < h - 1 && !visited[(currY + 1) * w + i] && colorsMatch(getPixelColor(data, i, currY + 1, w), targetColor, 30)) queue.push(i, currY + 1);
+        }
+      }
+
+      ctx.putImageData(imgData, 0, 0);
+      saveState();
+    }
+
+    function getPixelColor(data, x, y, width) {
+      const i = (y * width + x) * 4;
+      return [data[i], data[i + 1], data[i + 2], data[i + 3]];
+    }
+
+    function setPixelColor(data, x, y, width, color) {
+      const i = (y * width + x) * 4;
+      data[i] = color[0]; data[i + 1] = color[1]; data[i + 2] = color[2]; data[i + 3] = color[3];
+    }
+
+    function colorsMatch(a, b, tolerance = 20) {
+      return Math.abs(a[0] - b[0]) <= tolerance &&
+             Math.abs(a[1] - b[1]) <= tolerance &&
+             Math.abs(a[2] - b[2]) <= tolerance &&
+             Math.abs(a[3] - b[3]) <= tolerance;
+    }
+
+    function getCoordinates(e) {
+      const rect = canvas.getBoundingClientRect();
+      let clientX = e.clientX, clientY = e.clientY;
+      if (e.touches && e.touches.length > 0) { clientX = e.touches[0].clientX; clientY = e.touches[0].clientY; }
+      return { x: clientX - rect.left, y: clientY - rect.top };
+    }
+
+    function handlePointerStart(e) {
+      if (isSubmitted) return;
+      const { x, y } = getCoordinates(e);
+
+      if (activeTool === 'bucket') {
+        performFloodFill(x, y, currentColor);
+        return;
+      }
+
+      isDrawing = true;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.strokeStyle = (activeTool === 'eraser') ? '#ffffff' : currentColor;
+      ctx.lineWidth = currentSize;
+      ctx.lineTo(x, y);
+      ctx.stroke();
+    }
+
+    function handlePointerMove(e) {
+      if (!isDrawing || isSubmitted || activeTool === 'bucket') return;
+      e.preventDefault();
+      const { x, y } = getCoordinates(e);
+      ctx.strokeStyle = (activeTool === 'eraser') ? '#ffffff' : currentColor;
+      ctx.lineWidth = currentSize;
+      ctx.lineTo(x, y);
+      ctx.stroke();
+    }
+
+    function handlePointerEnd() {
+      if (isDrawing) {
+        isDrawing = false;
+        ctx.closePath();
+        saveState();
+      }
+    }
+
+    canvas.addEventListener('mousedown', handlePointerStart);
+    canvas.addEventListener('mousemove', handlePointerMove);
+    canvas.addEventListener('mouseup', handlePointerEnd);
+    canvas.addEventListener('mouseleave', handlePointerEnd);
+
+    canvas.addEventListener('touchstart', (e) => { e.preventDefault(); handlePointerStart(e); }, { passive: false });
+    canvas.addEventListener('touchmove', (e) => { e.preventDefault(); handlePointerMove(e); }, { passive: false });
+    canvas.addEventListener('touchend', (e) => { e.preventDefault(); handlePointerEnd(); });
+
+    document.getElementById('toolsGroup').addEventListener('click', (e) => {
+      const btn = e.target.closest('.tool-btn');
+      if (!btn) return;
+      document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeTool = btn.dataset.tool;
+      updateModeUI();
+    });
+
+    function updateModeUI() {
+      if (activeTool === 'brush') { modeIcon.textContent = '🖌️'; modeName.textContent = 'Fırça Mode'; }
+      else if (activeTool === 'bucket') { modeIcon.textContent = '🪣'; modeName.textContent = 'Kova Doldurma Mode'; }
+      else if (activeTool === 'eraser') { modeIcon.textContent = '🧹'; modeName.textContent = 'Silgi Mode'; }
+    }
+
+    sizeRange.addEventListener('input', (e) => {
+      currentSize = parseInt(e.target.value, 10);
+      sizeLabel.textContent = `${currentSize}px`;
+      sizeDot.style.setProperty('--dot-size', `${Math.max(3, Math.min(22, currentSize))}px`);
+    });
+
+    document.getElementById('colorPalette').addEventListener('click', (e) => {
+      const btn = e.target.closest('.color-btn');
+      if (!btn) return;
+      document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentColor = btn.dataset.color;
+
+      if (activeTool === 'eraser') {
+        activeTool = 'brush';
+        document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+        document.querySelector('[data-tool="brush"]').classList.add('active');
+        updateModeUI();
+      }
+    });
+
+    customColorPicker.addEventListener('input', (e) => {
+      currentColor = e.target.value;
+      customColorInner.style.setProperty('--custom-color-val', currentColor);
+      document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+      if (activeTool === 'eraser') {
+        activeTool = 'brush';
+        document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+        document.querySelector('[data-tool="brush"]').classList.add('active');
+        updateModeUI();
+      }
+    });
+
+    undoBtn.addEventListener('click', undo);
+    clearBtn.addEventListener('click', clearCanvas);
+
+    // --- Gönder Butonu İle Çizimi Gönderme ---
+    async function submitDrawing() {
+      if (isSubmitted) return;
+      isSubmitted = true;
+      clearInterval(timerInterval);
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Gönderiliyor...';
+
+      // 400px genişliğinde JPEG olarak sıkıştır (veri boyutunu düşür)
+      const offscreen = document.createElement('canvas');
+      const ratio = canvas.height / canvas.width;
+      offscreen.width = 400;
+      offscreen.height = Math.round(400 * ratio);
+      const octx = offscreen.getContext('2d');
+      octx.fillStyle = '#ffffff';
+      octx.fillRect(0, 0, offscreen.width, offscreen.height);
+      octx.drawImage(canvas, 0, 0, offscreen.width, offscreen.height);
+
+      const imageData = offscreen.toDataURL('image/jpeg', 0.65);
+      const payload = { action: 'send_drawing', word: targetWord, image: imageData, chatId, userId };
+
+      // tg.sendData() — ReplyKeyboard webApp butonuyla açıldığında çalışır
+      if (tg && tg.sendData) {
+        try {
+          tg.sendData(JSON.stringify(payload));
+          submitBtn.textContent = 'Gönderildi! ✅';
+          setTimeout(() => { if (tg.close) tg.close(); }, 800);
+          return;
+        } catch (e) {
+          console.error('sendData hatası:', e);
+        }
+      }
+
+      // Fallback: Telegram dışı ortam (test)
+      submitBtn.textContent = 'Gönderildi! ✅';
+      alert('Test modu: Çizim hazır! (Telegram dışı ortam)');
+    }
+
+
+    submitBtn.addEventListener('click', submitDrawing);
+
+    function startTimer() {
+      timerValue.textContent = `${remainingTime}s`;
+      timerInterval = setInterval(() => {
+        remainingTime--;
+        timerValue.textContent = `${remainingTime}s`;
+        if (remainingTime <= 10) timerBox.classList.add('warning');
+        if (remainingTime <= 0) { clearInterval(timerInterval); submitDrawing(); }
+      }, 1000);
+    }
+
+    window.addEventListener('load', () => {
+      initCanvas();
+      startTimer();
+      sizeDot.style.setProperty('--dot-size', '6px');
+    });
+
+    window.addEventListener('resize', () => initCanvas());
+  </script>
+</body>
+</html>
