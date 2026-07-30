@@ -27,8 +27,15 @@ if (!BOT_TOKEN || BOT_TOKEN === 'YOUR_TELEGRAM_BOT_TOKEN_HERE') {
 const bot = new Telegraf(BOT_TOKEN);
 let botUsername = '';
 
-// Oyuncu başına kaç kez çizim hakkı verileceği (Varsayılan: Her oyuncu 2 kez çizer)
+// Oyuncu başına kaç kez çizim hakkı verileceği
 const MAX_CYCLES_PER_GAME = 2;
+
+// Geçerli Game Status'lar:
+// 'idle'         → Oyun yok
+// 'lobby'        → Lobi açık, oyuncu bekleniyor
+// 'drawing'      → Çizen kişi çizim yapıyor
+// 'guessing'     → Tahminciler kelimeyi tahmin ediyor
+// 'transitioning'→ Turlar arası geçiş (hiçbir event kabul edilmez!)
 
 /**
  * Oyun Durum Haritası (In-Memory Game State)
@@ -321,6 +328,9 @@ async function startNextTurn(chatId) {
   const game = games.get(chatId);
   if (!game) return;
 
+  // Sadece transitioning veya lobby durumunda çalışabilir — çift tetiklenmeyi engeller!
+  if (game.status !== 'transitioning' && game.status !== 'lobby') return;
+
   // Mevcut döngüde henüz çizmeyen oyuncuları bul
   const remainingPlayersInCycle = Array.from(game.players.values()).filter(p => !game.drawnPlayerIds.has(p.id));
 
@@ -329,7 +339,7 @@ async function startNextTurn(chatId) {
     // Eğer tüm döngüler henüz tamamlanmadıysa bir sonraki döngüyü başlat!
     if (game.cycleCount < MAX_CYCLES_PER_GAME) {
       game.cycleCount++;
-      game.drawnPlayerIds.clear(); // Çizim hakkı sıfırlandı
+      game.drawnPlayerIds.clear();
 
       await bot.telegram.sendMessage(
         chatId,
@@ -339,6 +349,7 @@ async function startNextTurn(chatId) {
         { parse_mode: 'Markdown' }
       );
 
+      // transitioning zaten set edilmiş, 5 sn sonra tekrar çağır
       setTimeout(() => { startNextTurn(chatId); }, 5000);
       return;
     }
@@ -391,20 +402,19 @@ async function startNextTurn(chatId) {
   // DM Gönder
   await sendDrawerDM(drawerUser.id, secretWord, chatId);
 
-  // 90 Saniyelik Çizim Süresi Zamanlayıcısı
+  // 135 Saniyelik Çizim Süresi Zamanlayıcısı
+  // (Client 120s'de otomatik gönderir, 15s buffer eklendi)
   if (game.timer) clearTimeout(game.timer);
   game.timer = setTimeout(() => {
-    if (game.status === 'drawing') {
-      bot.telegram.sendMessage(
-        chatId,
-        `⌛ *Süre Doldu!* ${drawerUser.username} çizimini zamanında göndermedi.\n` +
-        `⏳ 5 saniye içinde sonraki tura geçiliyor...`,
-        { parse_mode: 'Markdown' }
-      );
-      
-      setTimeout(() => { startNextTurn(chatId); }, 5000);
-    }
-  }, 90000);
+    if (game.status !== 'drawing') return;
+    game.status = 'transitioning';
+    bot.telegram.sendMessage(
+      chatId,
+      `⏳ *${drawerUser.username}* çizimini gönderemediyse tur geçiliyor...`,
+      { parse_mode: 'Markdown' }
+    );
+    setTimeout(() => { startNextTurn(chatId); }, 5000);
+  }, 135000);
 }
 
 /**
@@ -502,16 +512,16 @@ async function processDrawingSubmission(chatId, drawerId, base64ImageData) {
 
   // 60 Saniyelik Tahmin Süresi
   game.timer = setTimeout(() => {
-    if (game.status === 'guessing') {
-      bot.telegram.sendMessage(
-        chatId,
-        `⌛ *Süre Doldu!* Kimse doğru tahmini yapamadı.\n🔑 Cevap: *${game.word}* idi!\n\n` +
-        `⏳ 5 saniye içinde sonraki tura geçiliyor...`,
-        { parse_mode: 'Markdown' }
-      );
-      
-      setTimeout(() => { startNextTurn(chatId); }, 5000);
-    }
+    if (game.status !== 'guessing') return; // Zaten geçildi
+    game.status = 'transitioning'; // Önce kilitle! Yeni tahminleri engelle
+    const expiredWord = game.word;
+    bot.telegram.sendMessage(
+      chatId,
+      `⌛ *Süre Doldu!* Kimse doğru tahmini yapamadı.\n🔑 Cevap: *${expiredWord}* idi!\n\n` +
+      `⏳ 5 saniye içinde sonraki tura geçiliyor...`,
+      { parse_mode: 'Markdown' }
+    );
+    setTimeout(() => { startNextTurn(chatId); }, 5000);
   }, 60000);
 
   return true;
@@ -524,21 +534,21 @@ bot.on('text', (ctx, next) => {
   const chatId = ctx.chat.id;
   const game = games.get(chatId);
 
+  // Sadece 'guessing' durumunda işle — transitioning/drawing vb. engellensin!
   if (!game || game.status !== 'guessing') return next();
 
   const guesser = ctx.from;
 
   if (guesser.id === game.drawer.id) return next();
-
-  if (!game.players.has(guesser.id)) {
-    return next();
-  }
+  if (!game.players.has(guesser.id)) return next();
 
   const guess = ctx.message.text.trim().toLocaleLowerCase('tr');
   const answer = game.word.trim().toLocaleLowerCase('tr');
 
   // DOĞRU TAHMİN!
   if (guess === answer) {
+    // Önce kilitle! Başka tahminler veya timer çift tetiklenemesin
+    game.status = 'transitioning';
     if (game.timer) clearTimeout(game.timer);
 
     const guesserName = guesser.username ? `@${guesser.username}` : guesser.first_name;
@@ -556,10 +566,8 @@ bot.on('text', (ctx, next) => {
       { parse_mode: 'Markdown' }
     );
 
-    // 5 Saniye Sonra Otomatik Sonraki Oyuncunun Turunu Başlat!
-    setTimeout(() => {
-      startNextTurn(chatId);
-    }, 5000);
+    // 5 sn sonra status zaten transitioning → startNextTurn güvenle çalışır
+    setTimeout(() => { startNextTurn(chatId); }, 5000);
   } else {
     return next();
   }

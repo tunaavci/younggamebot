@@ -518,7 +518,7 @@
     let currentSize = 6;
     let historyStack = [];
     const MAX_HISTORY = 25;
-    let remainingTime = 60;
+    let remainingTime = 120;
     let timerInterval = null;
     let isSubmitted = false;
 
@@ -798,7 +798,7 @@
       timerInterval = setInterval(() => {
         remainingTime--;
         timerValue.textContent = `${remainingTime}s`;
-        if (remainingTime <= 10) timerBox.classList.add('warning');
+        if (remainingTime <= 20) timerBox.classList.add('warning');
         if (remainingTime <= 0) { clearInterval(timerInterval); submitDrawing(); }
       }, 1000);
     }
