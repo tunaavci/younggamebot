@@ -27,18 +27,12 @@ if (!BOT_TOKEN || BOT_TOKEN === 'YOUR_TELEGRAM_BOT_TOKEN_HERE') {
 const bot = new Telegraf(BOT_TOKEN);
 let botUsername = '';
 
+// Oyuncu başına kaç kez çizim hakkı verileceği (Varsayılan: Her oyuncu 2 kez çizer)
+const MAX_CYCLES_PER_GAME = 2;
+
 /**
  * Oyun Durum Haritası (In-Memory Game State)
  * Key: chatId (Grup ID)
- * Value: {
- *   status: 'idle' | 'lobby' | 'drawing' | 'guessing',
- *   players: Map<userId, { id: number, username: string, name: string }>,
- *   drawnPlayerIds: Set<number>,
- *   drawer: { id: number, username: string, name: string },
- *   word: string,
- *   timer: TimeoutHandle,
- *   scores: Map<userId, { username: string, points: number }>
- * }
  */
 const games = new Map();
 const drawerToGroup = new Map();
@@ -148,7 +142,7 @@ bot.start(async (ctx) => {
     `1. Beni bir Telegram grubuna ekle.\n` +
     `2. Grupta */oyunbaslat* yazarak lobiyi aç.\n` +
     `3. Oyuncular katıldıktan sonra oyunu başlatın.\n` +
-    `4. Her oyuncu sırayla 1 tur çizer, en çok puanı toplayan kazanır!\n\n` +
+    `4. Her oyuncu sırayla çizim yapar, tur döngüleri bittiğinde en çok puanı toplayan kazanır!\n\n` +
     `🚀 Hazırsın! Gruplarda oynamaya başlayabilirsin.`,
     Markup.inlineKeyboard([
       [Markup.button.url('👥 Grubuna Ekle', `https://t.me/${botUsername}?startgroup=true`)]
@@ -186,6 +180,8 @@ bot.command('oyunbaslat', async (ctx) => {
       status: 'idle',
       players: new Map(),
       drawnPlayerIds: new Set(),
+      cycleCount: 1,
+      totalRoundsPlayed: 0,
       drawer: null,
       word: null,
       timer: null,
@@ -198,13 +194,15 @@ bot.command('oyunbaslat', async (ctx) => {
     return ctx.reply('⚠️ Bu grupta zaten aktif bir oyun veya lobi var! İptal etmek için /iptal yazın.');
   }
 
-  // Lobiyi Başlat
+  // Lobiyi Sıfırla ve Başlat
   game.status = 'lobby';
   game.players.clear();
   game.drawnPlayerIds.clear();
+  game.cycleCount = 1;
+  game.totalRoundsPlayed = 0;
   game.scores.clear();
 
-  // Komutu atan oyuncuyu otomatik lobiye ekle
+  // Komutu atan oyuncuyu lobiye ekle
   const starter = ctx.from;
   const starterName = starter.username ? `@${starter.username}` : starter.first_name;
   game.players.set(starter.id, { id: starter.id, username: starterName, name: starter.first_name });
@@ -229,7 +227,7 @@ async function renderLobbyMessage(ctx, chatId) {
     `🎮 *ÇİZ TAHMİN ET OYUNU LOBİSİ*\n\n` +
     `👥 *Katılan Oyuncular (${game.players.size}):*\n` +
     `${playerListText}\n` +
-    `📌 *Kural:* Oyun başladığında sırayla her oyuncu 1 tur çizecektir!`;
+    `📌 *Oyun Düzeni:* Her oyuncu toplam *${MAX_CYCLES_PER_GAME} kez* çizecektir!`;
 
   const keyboard = Markup.inlineKeyboard([
     [
@@ -311,24 +309,42 @@ bot.action(/^start_game_(.+)$/, async (ctx) => {
 
   await ctx.answerCbQuery('🚀 Oyun başlatılıyor...');
   game.drawnPlayerIds.clear();
+  game.cycleCount = 1;
+  game.totalRoundsPlayed = 0;
   startNextTurn(chatId);
 });
 
 /**
- * Sıradaki Turu Başlatma (Sırayla Tüm Oyunculara Çizim Yaptıran Motor)
+ * Sıradaki Turu Başlatma Motoru (Döngü Destekli)
  */
 async function startNextTurn(chatId) {
   const game = games.get(chatId);
   if (!game) return;
 
-  // Çizmeyen oyuncuları bul
-  const remainingPlayers = Array.from(game.players.values()).filter(p => !game.drawnPlayerIds.has(p.id));
+  // Mevcut döngüde henüz çizmeyen oyuncuları bul
+  const remainingPlayersInCycle = Array.from(game.players.values()).filter(p => !game.drawnPlayerIds.has(p.id));
 
-  // Herkes çizdiyse OYUNU BİTİR ve Şampiyonu İlan Et!
-  if (remainingPlayers.length === 0) {
+  // Mevcut döngüdeki herkes çizdiyse:
+  if (remainingPlayersInCycle.length === 0) {
+    // Eğer tüm döngüler henüz tamamlanmadıysa bir sonraki döngüyü başlat!
+    if (game.cycleCount < MAX_CYCLES_PER_GAME) {
+      game.cycleCount++;
+      game.drawnPlayerIds.clear(); // Çizim hakkı sıfırlandı
+
+      await bot.telegram.sendMessage(
+        chatId,
+        `🔄 *${game.cycleCount}. DÖNGÜ BAŞLIYOR!*\n` +
+        `Her oyuncu birer kez daha çizecektir.\n` +
+        `⏳ 5 saniye içinde yeni tur başlıyor...`,
+        { parse_mode: 'Markdown' }
+      );
+
+      setTimeout(() => { startNextTurn(chatId); }, 5000);
+      return;
+    }
+
+    // TÜM DÖNGÜLER BİTTİ -> OYUNU BİTİR VE ŞAMPİYONU İLAN ET!
     let finalBoardText = '🏆 *OYUN BİTTİ! NİHAİ SKOR TABLOSU:*\n\n';
-    
-    // Skorlara göre sırala
     const sortedScores = Array.from(game.scores.values()).sort((a, b) => b.points - a.points);
 
     if (sortedScores.length > 0) {
@@ -346,21 +362,21 @@ async function startNextTurn(chatId) {
     return;
   }
 
-  // Sıradaki çizen oyuncuyu rastgele seç ve kaydet
-  const drawerUser = remainingPlayers[Math.floor(Math.random() * remainingPlayers.length)];
+  // Sıradaki çizen oyuncuyu seç
+  const drawerUser = remainingPlayersInCycle[Math.floor(Math.random() * remainingPlayersInCycle.length)];
   game.drawnPlayerIds.add(drawerUser.id);
+  game.totalRoundsPlayed++;
 
+  const totalGameRounds = game.players.size * MAX_CYCLES_PER_GAME;
   const secretWord = getRandomWord();
+
   game.status = 'drawing';
   game.drawer = drawerUser;
   game.word = secretWord;
 
-  const totalRounds = game.players.size;
-  const currentRoundNum = game.drawnPlayerIds.size;
-
   await bot.telegram.sendMessage(
     chatId,
-    `🎨 *TUR ${currentRoundNum}/${totalRounds} BAŞLADI!*\n\n` +
+    `🎨 *TUR ${game.totalRoundsPlayed}/${totalGameRounds} BAŞLADI!* (Döngü ${game.cycleCount}/${MAX_CYCLES_PER_GAME})\n\n` +
     `👤 *Çizen:* ${drawerUser.username}\n` +
     `👥 *Oyundaki Tahminciler:* ${Array.from(game.players.values()).map(p => p.username).join(', ')}\n\n` +
     `📩 ${drawerUser.username} için özel mesaja çizim linki gönderildi!`,
@@ -591,6 +607,8 @@ function resetGame(chatId) {
     game.status = 'idle';
     game.players.clear();
     game.drawnPlayerIds.clear();
+    game.cycleCount = 1;
+    game.totalRoundsPlayed = 0;
     game.drawer = null;
     game.word = null;
     game.timer = null;
