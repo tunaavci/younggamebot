@@ -27,46 +27,36 @@ if (!BOT_TOKEN || BOT_TOKEN === 'YOUR_TELEGRAM_BOT_TOKEN_HERE') {
 const bot = new Telegraf(BOT_TOKEN);
 let botUsername = '';
 
-// Oyuncu başına kaç kez çizim hakkı verileceği
-const MAX_CYCLES_PER_GAME = 2;
-
-// Geçerli Game Status'lar:
-// 'idle'         → Oyun yok
-// 'lobby'        → Lobi açık, oyuncu bekleniyor
-// 'drawing'      → Çizen kişi çizim yapıyor
-// 'guessing'     → Tahminciler kelimeyi tahmin ediyor
-// 'transitioning'→ Turlar arası geçiş (hiçbir event kabul edilmez!)
-
 /**
- * Oyun Durum Haritası (In-Memory Game State)
- * Key: chatId (Grup ID)
+ * Status Açıklamaları:
+ * 'idle'          → Oyun yok
+ * 'lobby'         → Lobi açık, oyuncu katılım bekliyor
+ * 'drawing'       → Çizen kişi çizim yapıyor
+ * 'guessing'      → Tahmin aşaması
+ * 'transitioning' → Turlar arası geçiş (hiçbir event kabul edilmez!)
  */
+
 const games = new Map();
+// drawerId → { chatId, messageId }
 const drawerToGroup = new Map();
 
-// ─── Statik Dosya MIME Tablosu ─────────────────────────────────────────────────
+// ─── Statik Dosya Sunucusu ─────────────────────────────────────────────────────
 const MIME = {
   '.html': 'text/html; charset=utf-8',
-  '.css':  'text/css',
-  '.js':   'application/javascript',
-  '.png':  'image/png',
-  '.jpg':  'image/jpeg',
-  '.ico':  'image/x-icon',
+  '.css': 'text/css',
+  '.js': 'application/javascript',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.ico': 'image/x-icon',
 };
 
-// ─── HTTP Sunucusu: Statik Dosya + Canvas Resim Yükleme API ─────────────────────
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
-  // TWA Canvas Resim Gönderim API Endpoint (HTTP POST)
   if (req.method === 'POST' && req.url === '/api/submit-drawing') {
     let body = '';
     req.on('data', chunk => { body += chunk.toString(); });
@@ -74,7 +64,6 @@ const server = http.createServer((req, res) => {
       try {
         const payload = JSON.parse(body);
         const { image, chatId, userId } = payload;
-
         const drawerIdNum = parseInt(userId, 10);
         const dmData = drawerToGroup.get(drawerIdNum);
         const targetChatId = parseInt(chatId, 10) || (dmData ? dmData.chatId : null);
@@ -86,16 +75,15 @@ const server = http.createServer((req, res) => {
         }
 
         const success = await processDrawingSubmission(targetChatId, drawerIdNum, image);
-
         if (success) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true }));
         } else {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Çizim kabul edilmedi veya süre doldu' }));
+          res.end(JSON.stringify({ error: 'Çizim kabul edilmedi' }));
         }
       } catch (err) {
-        console.error('HTTP Resim Gönderim Hatası:', err);
+        console.error('HTTP Submit Hatası:', err);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Sunucu hatası' }));
       }
@@ -103,533 +91,440 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (req.url === '/healthz') {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('OK');
-    return;
-  }
+  if (req.url === '/healthz') { res.writeHead(200); res.end('OK'); return; }
 
-  const requestedFile = req.url.split('?')[0];
-  const filePath = path.join(__dirname, requestedFile === '/' ? 'index.html' : requestedFile);
-  serveFile(res, filePath);
-});
-
-function serveFile(res, filePath) {
+  const filePath = path.join(__dirname, req.url.split('?')[0] === '/' ? 'index.html' : req.url.split('?')[0]);
   const ext = path.extname(filePath) || '.html';
-  const resolvedPath = ext === '.html' && !filePath.endsWith('.html') ? filePath + '.html' : filePath;
-
-  fs.readFile(resolvedPath, (err, data) => {
+  fs.readFile(filePath, (err, data) => {
     if (err) {
-      fs.readFile(path.join(__dirname, 'index.html'), (err2, data2) => {
-        if (err2) {
-          res.writeHead(404);
-          res.end('Not Found');
-          return;
-        }
+      fs.readFile(path.join(__dirname, 'index.html'), (e2, d2) => {
+        if (e2) { res.writeHead(404); res.end('Not Found'); return; }
         res.writeHead(200, { 'Content-Type': MIME['.html'] });
-        res.end(data2);
+        res.end(d2);
       });
       return;
     }
     res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
     res.end(data);
   });
+});
+
+// ─── Yardımcı: Diziyi Karıştır ────────────────────────────────────────────────
+function shuffleArray(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// ─── Yardımcı: Güvenli Timer Temizle ──────────────────────────────────────────
+function clearGameTimer(game) {
+  if (game.timer) {
+    clearTimeout(game.timer);
+    game.timer = null;
+  }
 }
 
 // ─── Bot Komutları ─────────────────────────────────────────────────────────────
 
-/**
- * /start — DM Karşılama
- */
 bot.start(async (ctx) => {
   const firstName = ctx.from.first_name || 'Oyuncu';
   return ctx.replyWithMarkdown(
     `👋 *Merhaba ${firstName}!* Çiz Tahmin Et oyun botuna hoş geldin!\n\n` +
     `🎮 *Nasıl Oynanır?*\n` +
-    `1. Beni bir Telegram grubuna ekle.\n` +
+    `1. Beni bir Telegram grubuna ekle ve yönetici yap.\n` +
     `2. Grupta */oyunbaslat* yazarak lobiyi aç.\n` +
     `3. Oyuncular katıldıktan sonra oyunu başlatın.\n` +
-    `4. Her oyuncu sırayla çizim yapar, tur döngüleri bittiğinde en çok puanı toplayan kazanır!\n\n` +
-    `🚀 Hazırsın! Gruplarda oynamaya başlayabilirsin.`,
-    Markup.inlineKeyboard([
-      [Markup.button.url('👥 Grubuna Ekle', `https://t.me/${botUsername}?startgroup=true`)]
-    ])
+    `4. Sıra sana gelince DM'ine gelen butonla çizimini yap!\n` +
+    `5. Oyun */iptal* yazana kadar sürekli döner.\n\n` +
+    `🚀 Hazırsın!`,
+    Markup.inlineKeyboard([[Markup.button.url('👥 Grubuna Ekle', `https://t.me/${botUsername}?startgroup=true`)]])
   );
 });
 
-/**
- * /help — Yardım
- */
-bot.command('help', (ctx) => {
-  return ctx.replyWithMarkdown(
-    `🎨 *Çiz Tahmin Et — Yardım*\n\n` +
-    `📋 *Komutlar:*\n` +
-    `• /oyunbaslat — Grupta katılım lobisini açar\n` +
-    `• /iptal — Devam eden oyunu iptal eder _(yöneticiler)_\n` +
-    `• /help — Yardım menüsü`
-  );
-});
+bot.command('help', (ctx) => ctx.replyWithMarkdown(
+  `🎨 *Çiz Tahmin Et — Yardım*\n\n` +
+  `• /oyunbaslat — Lobi açar\n` +
+  `• /iptal — Oyunu bitirir _(yöneticiler)_\n` +
+  `• /help — Bu menü\n\n` +
+  `⚠️ Botun grup mesajlarını okuyabilmesi için **yönetici** yapılması gerekmektedir.`
+));
 
-/**
- * /oyunbaslat — Lobi Oluşturma
- */
 bot.command('oyunbaslat', async (ctx) => {
   const chatId = ctx.chat.id;
-  const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-
-  if (!isGroup) {
+  if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
     return ctx.reply('⚠️ Bu komut yalnızca Telegram gruplarında kullanılabilir!');
   }
 
   let game = games.get(chatId);
-  if (!game) {
-    game = {
-      status: 'idle',
-      players: new Map(),
-      drawnPlayerIds: new Set(),
-      cycleCount: 1,
-      totalRoundsPlayed: 0,
-      drawer: null,
-      word: null,
-      timer: null,
-      scores: new Map()
-    };
-    games.set(chatId, game);
+  if (game && game.status !== 'idle') {
+    return ctx.reply('⚠️ Zaten aktif bir oyun veya lobi var! İptal için /iptal yazın.');
   }
 
-  if (game.status !== 'idle') {
-    return ctx.reply('⚠️ Bu grupta zaten aktif bir oyun veya lobi var! İptal etmek için /iptal yazın.');
-  }
+  game = {
+    status: 'lobby',
+    players: new Map(),      // userId → { id, username }
+    playerOrder: [],          // Karıştırılmış sıralı oyuncu listesi
+    currentDrawerIndex: 0,   // Sıradaki çizeni gösteren index
+    roundNumber: 0,          // Toplam oynanan tur sayısı
+    drawer: null,
+    word: null,
+    timer: null,
+    scores: new Map()
+  };
+  games.set(chatId, game);
 
-  // Lobiyi Sıfırla ve Başlat
-  game.status = 'lobby';
-  game.players.clear();
-  game.drawnPlayerIds.clear();
-  game.cycleCount = 1;
-  game.totalRoundsPlayed = 0;
-  game.scores.clear();
-
-  // Komutu atan oyuncuyu lobiye ekle
   const starter = ctx.from;
   const starterName = starter.username ? `@${starter.username}` : starter.first_name;
-  game.players.set(starter.id, { id: starter.id, username: starterName, name: starter.first_name });
+  game.players.set(starter.id, { id: starter.id, username: starterName });
 
   await renderLobbyMessage(ctx, chatId);
 });
 
-/**
- * Lobi Mesajını Güncelleyen Yardımcı Fonksiyon
- */
 async function renderLobbyMessage(ctx, chatId) {
   const game = games.get(chatId);
   if (!game || game.status !== 'lobby') return;
 
-  let playerListText = '';
-  let count = 1;
-  game.players.forEach(p => {
-    playerListText += `${count++}. ${p.username}\n`;
-  });
+  let list = '';
+  let i = 1;
+  game.players.forEach(p => { list += `${i++}. ${p.username}\n`; });
 
-  const lobbyText =
-    `🎮 *ÇİZ TAHMİN ET OYUNU LOBİSİ*\n\n` +
-    `👥 *Katılan Oyuncular (${game.players.size}):*\n` +
-    `${playerListText}\n` +
-    `📌 *Oyun Düzeni:* Her oyuncu toplam *${MAX_CYCLES_PER_GAME} kez* çizecektir!`;
+  const text =
+    `🎮 *ÇİZ TAHMİN ET — LOBİ*\n\n` +
+    `👥 *Katılan Oyuncular (${game.players.size}):*\n${list}\n` +
+    `📌 Oyun başladıktan sonra sırayla herkes çizer.\n` +
+    `_/iptal yazana kadar oyun sürer._`;
 
-  const keyboard = Markup.inlineKeyboard([
-    [
-      Markup.button.callback('🙋‍♂️ Katıl', `join_lobby_${chatId}`),
-      Markup.button.callback('🚪 Ayrıl', `leave_lobby_${chatId}`)
-    ],
-    [
-      Markup.button.callback('▶️ Oyunu Başlat', `start_game_${chatId}`)
-    ]
+  const kb = Markup.inlineKeyboard([
+    [Markup.button.callback('🙋‍♂️ Katıl', `join_${chatId}`), Markup.button.callback('🚪 Ayrıl', `leave_${chatId}`)],
+    [Markup.button.callback('▶️ Oyunu Başlat', `startgame_${chatId}`)]
   ]);
 
   try {
-    if (ctx.callbackQuery) {
-      await ctx.editMessageText(lobbyText, { parse_mode: 'Markdown', ...keyboard });
-    } else {
-      await ctx.reply(lobbyText, { parse_mode: 'Markdown', ...keyboard });
-    }
-  } catch (err) {}
+    if (ctx.callbackQuery) await ctx.editMessageText(text, { parse_mode: 'Markdown', ...kb });
+    else await ctx.reply(text, { parse_mode: 'Markdown', ...kb });
+  } catch (_) {}
 }
 
-/**
- * Lobiye Katıl Butonu
- */
-bot.action(/^join_lobby_(.+)$/, async (ctx) => {
+bot.action(/^join_(.+)$/, async (ctx) => {
   const chatId = parseInt(ctx.match[1], 10);
   const game = games.get(chatId);
+  if (!game || game.status !== 'lobby') return ctx.answerCbQuery('⚠️ Lobi aktif değil.', { show_alert: true });
+  if (game.players.has(ctx.from.id)) return ctx.answerCbQuery('ℹ️ Zaten katıldınız!');
 
-  if (!game || game.status !== 'lobby') {
-    return ctx.answerCbQuery('⚠️ Lobi süresi dolmuş veya oyun başlamış.', { show_alert: true });
-  }
-
-  const user = ctx.from;
-  const userName = user.username ? `@${user.username}` : user.first_name;
-
-  if (game.players.has(user.id)) {
-    return ctx.answerCbQuery('ℹ️ Zaten oyuna katıldınız!', { show_alert: false });
-  }
-
-  game.players.set(user.id, { id: user.id, username: userName, name: user.first_name });
-  await ctx.answerCbQuery('✅ Oyuna başarıyla katıldınız!');
+  const userName = ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name;
+  game.players.set(ctx.from.id, { id: ctx.from.id, username: userName });
+  await ctx.answerCbQuery('✅ Katıldınız!');
   await renderLobbyMessage(ctx, chatId);
 });
 
-/**
- * Lobiden Ayrıl Butonu
- */
-bot.action(/^leave_lobby_(.+)$/, async (ctx) => {
+bot.action(/^leave_(.+)$/, async (ctx) => {
   const chatId = parseInt(ctx.match[1], 10);
   const game = games.get(chatId);
+  if (!game || game.status !== 'lobby') return ctx.answerCbQuery('⚠️ Lobi aktif değil.', { show_alert: true });
+  if (!game.players.has(ctx.from.id)) return ctx.answerCbQuery('ℹ️ Lobide değilsiniz.');
 
-  if (!game || game.status !== 'lobby') {
-    return ctx.answerCbQuery('⚠️ Lobi bulunamadı.', { show_alert: true });
-  }
-
-  const user = ctx.from;
-  if (!game.players.has(user.id)) {
-    return ctx.answerCbQuery('ℹ️ Zaten lobide değilsiniz.', { show_alert: false });
-  }
-
-  game.players.delete(user.id);
-  await ctx.answerCbQuery('🚪 Lobiden ayrıldınız.');
+  game.players.delete(ctx.from.id);
+  await ctx.answerCbQuery('🚪 Ayrıldınız.');
   await renderLobbyMessage(ctx, chatId);
 });
 
-/**
- * Oyunu Başlat Butonu
- */
-bot.action(/^start_game_(.+)$/, async (ctx) => {
+bot.action(/^startgame_(.+)$/, async (ctx) => {
   const chatId = parseInt(ctx.match[1], 10);
   const game = games.get(chatId);
-
-  if (!game || game.status !== 'lobby') {
-    return ctx.answerCbQuery('⚠️ Lobi aktif değil.', { show_alert: true });
-  }
-
-  if (game.players.size < 1) {
-    return ctx.answerCbQuery('⚠️ Oyunu başlatmak için en az 1 oyuncu olmalı!', { show_alert: true });
-  }
+  if (!game || game.status !== 'lobby') return ctx.answerCbQuery('⚠️ Lobi aktif değil.', { show_alert: true });
+  if (game.players.size < 1) return ctx.answerCbQuery('⚠️ En az 1 oyuncu gerekli!', { show_alert: true });
 
   await ctx.answerCbQuery('🚀 Oyun başlatılıyor...');
-  game.drawnPlayerIds.clear();
-  game.cycleCount = 1;
-  game.totalRoundsPlayed = 0;
+
+  // Oyuncu sırasını karıştır
+  game.playerOrder = shuffleArray(Array.from(game.players.keys()));
+  game.currentDrawerIndex = 0;
+  game.roundNumber = 0;
+  game.status = 'transitioning';
+
   startNextTurn(chatId);
 });
 
-/**
- * Sıradaki Turu Başlatma Motoru (Döngü Destekli)
- */
+// ─── Tur Motoru ────────────────────────────────────────────────────────────────
 async function startNextTurn(chatId) {
   const game = games.get(chatId);
   if (!game) return;
+  if (game.status !== 'transitioning') return; // Çift tetiklenme koruması
 
-  // Sadece transitioning veya lobby durumunda çalışabilir — çift tetiklenmeyi engeller!
-  if (game.status !== 'transitioning' && game.status !== 'lobby') return;
+  clearGameTimer(game);
 
-  // Mevcut döngüde henüz çizmeyen oyuncuları bul
-  const remainingPlayersInCycle = Array.from(game.players.values()).filter(p => !game.drawnPlayerIds.has(p.id));
-
-  // Mevcut döngüdeki herkes çizdiyse:
-  if (remainingPlayersInCycle.length === 0) {
-    // Eğer tüm döngüler henüz tamamlanmadıysa bir sonraki döngüyü başlat!
-    if (game.cycleCount < MAX_CYCLES_PER_GAME) {
-      game.cycleCount++;
-      game.drawnPlayerIds.clear();
-
-      await bot.telegram.sendMessage(
-        chatId,
-        `🔄 *${game.cycleCount}. DÖNGÜ BAŞLIYOR!*\n` +
-        `Her oyuncu birer kez daha çizecektir.\n` +
-        `⏳ 5 saniye içinde yeni tur başlıyor...`,
-        { parse_mode: 'Markdown' }
-      );
-
-      // transitioning zaten set edilmiş, 5 sn sonra tekrar çağır
-      setTimeout(() => { startNextTurn(chatId); }, 5000);
-      return;
-    }
-
-    // TÜM DÖNGÜLER BİTTİ -> OYUNU BİTİR VE ŞAMPİYONU İLAN ET!
-    let finalBoardText = '🏆 *OYUN BİTTİ! NİHAİ SKOR TABLOSU:*\n\n';
-    const sortedScores = Array.from(game.scores.values()).sort((a, b) => b.points - a.points);
-
-    if (sortedScores.length > 0) {
-      sortedScores.forEach((s, idx) => {
-        const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '•';
-        finalBoardText += `${medal} ${s.username}: *${s.points} Puan*\n`;
-      });
-      finalBoardText += `\n🎉 *Tebrikler ${sortedScores[0].username}! Oyunu 1. sırada tamamladın!*`;
-    } else {
-      finalBoardText += `Puan kazanan oyuncu olmadı.`;
-    }
-
-    await bot.telegram.sendMessage(chatId, finalBoardText, { parse_mode: 'Markdown' });
-    resetGame(chatId);
+  // Oyuncu kalmadıysa (hepsi ayrıldıysa) oyunu bitir
+  if (game.players.size === 0) {
+    games.delete(chatId);
     return;
   }
 
-  // Sıradaki çizen oyuncuyu seç
-  const drawerUser = remainingPlayersInCycle[Math.floor(Math.random() * remainingPlayersInCycle.length)];
-  game.drawnPlayerIds.add(drawerUser.id);
-  game.totalRoundsPlayed++;
+  // playerOrder içinde olmayan oyuncuları temizle (ayrılanlar)
+  game.playerOrder = game.playerOrder.filter(id => game.players.has(id));
+  if (game.playerOrder.length === 0) {
+    games.delete(chatId);
+    return;
+  }
 
-  const totalGameRounds = game.players.size * MAX_CYCLES_PER_GAME;
+  // Index taştıysa başa dön (sonsuz döngü)
+  if (game.currentDrawerIndex >= game.playerOrder.length) {
+    game.currentDrawerIndex = 0;
+  }
+
+  const drawerId = game.playerOrder[game.currentDrawerIndex];
+  const drawerUser = game.players.get(drawerId);
+  game.currentDrawerIndex = (game.currentDrawerIndex + 1) % game.playerOrder.length;
+
   const secretWord = getRandomWord();
-
+  game.roundNumber++;
   game.status = 'drawing';
   game.drawer = drawerUser;
   game.word = secretWord;
 
   await bot.telegram.sendMessage(
     chatId,
-    `🎨 *TUR ${game.totalRoundsPlayed}/${totalGameRounds} BAŞLADI!* (Döngü ${game.cycleCount}/${MAX_CYCLES_PER_GAME})\n\n` +
+    `🎨 *TUR ${game.roundNumber} BAŞLADI!*\n\n` +
     `👤 *Çizen:* ${drawerUser.username}\n` +
-    `👥 *Oyundaki Tahminciler:* ${Array.from(game.players.values()).map(p => p.username).join(', ')}\n\n` +
-    `📩 ${drawerUser.username} için özel mesaja çizim linki gönderildi!`,
+    `👥 *Tahminciler:* ${Array.from(game.players.values()).map(p => p.username).join(', ')}\n\n` +
+    `📩 ${drawerUser.username} özel mesajına çizim linki gönderildi!`,
     {
       parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('✏️ Çizime Başla', `get_dm_btn_${chatId}`)]
-      ])
+      ...Markup.inlineKeyboard([[Markup.button.callback('✏️ Çizime Başla', `getdm_${chatId}`)]])
     }
   );
 
-  // DM Gönder
-  await sendDrawerDM(drawerUser.id, secretWord, chatId);
+  await sendDrawerDM(drawerId, secretWord, chatId);
 
-  // 135 Saniyelik Çizim Süresi Zamanlayıcısı
-  // (Client 120s'de otomatik gönderir, 15s buffer eklendi)
-  if (game.timer) clearTimeout(game.timer);
+  // 135s sunucu timer (client 120s'de oto-gönderir, 15s buffer)
+  clearGameTimer(game);
   game.timer = setTimeout(() => {
     if (game.status !== 'drawing') return;
+    console.log(`[${chatId}] Çizim süresi doldu, geçiliyor...`);
     game.status = 'transitioning';
     bot.telegram.sendMessage(
       chatId,
-      `⏳ *${drawerUser.username}* çizimini gönderemediyse tur geçiliyor...`,
+      `⌛ *Süre Doldu!* ${drawerUser.username} çizimini gönderemediyse sonraki tura geçiliyor...\n⏳ 5 saniye...`,
       { parse_mode: 'Markdown' }
-    );
-    setTimeout(() => { startNextTurn(chatId); }, 5000);
+    ).catch(() => {});
+    setTimeout(() => startNextTurn(chatId), 5000);
   }, 135000);
 }
 
-/**
- * Gruptan "✏️ Çizime Başla" Butonuna Basıldığında DM Gönder
- */
-bot.action(/^get_dm_btn_(.+)$/, async (ctx) => {
-  const chatId = parseInt(ctx.match[1], 10);
-  const game = games.get(chatId);
-  const clickerId = ctx.from.id;
-
-  if (!game || game.status !== 'drawing') {
-    return ctx.answerCbQuery('⚠️ Aktif çizim turu yok.', { show_alert: true });
-  }
-
-  if (game.drawer.id !== clickerId) {
-    return ctx.answerCbQuery('⚠️ Sıradaki çizen oyuncu sen değilsin!', { show_alert: true });
-  }
-
-  const success = await sendDrawerDM(clickerId, game.word, chatId);
-  if (success) {
-    ctx.answerCbQuery('📩 Özel mesajına çizim linki gönderildi!', { show_alert: false });
-  } else {
-    ctx.answerCbQuery('⚠️ Özel mesaj gönderilemiyor. Lütfen bota özel mesaj atıp /start basın.', { show_alert: true });
-  }
-});
-
-/**
- * DM Üzerinden Çizene Mesaj Gönder
- */
+// ─── DM Gönder ─────────────────────────────────────────────────────────────────
 async function sendDrawerDM(drawerId, secretWord, chatId) {
   const twaUrl = `${WEBAPP_URL}/index.html?word=${encodeURIComponent(secretWord)}&chatId=${chatId}&userId=${drawerId}`;
 
+  // Önceki DM mesajını sil
   const oldDm = drawerToGroup.get(drawerId);
-  if (oldDm && oldDm.messageId) {
-    try {
-      await bot.telegram.deleteMessage(drawerId, oldDm.messageId);
-    } catch (_) {}
+  if (oldDm?.messageId) {
+    bot.telegram.deleteMessage(drawerId, oldDm.messageId).catch(() => {});
   }
 
   try {
     const sentMsg = await bot.telegram.sendMessage(
       drawerId,
       `🎯 *Gizli Kelimen:* \`${secretWord}\`\n\n` +
-      `Aşağıdaki *🎨 Çizmeye Başla* butonuna basarak çizimini yap ve "Gönder" butonuna bas!\n` +
-      `_📌 Çizimini gönderdiğin an bu mesaj otomatik silinecektir._`,
+      `Aşağıdaki butona basarak çizimini yap ve "Gönder"e bas!\n` +
+      `_📌 Çizim gönderildiğinde bu mesaj otomatik silinecek._`,
       {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.webApp('🎨 Çizmeye Başla', twaUrl)]
-        ])
+        ...Markup.inlineKeyboard([[Markup.button.webApp('🎨 Çizmeye Başla', twaUrl)]])
       }
     );
-
     drawerToGroup.set(drawerId, { chatId, messageId: sentMsg.message_id });
     return true;
   } catch (err) {
-    console.error(`DM gönderilemedi (User ID: ${drawerId}):`, err.message);
+    console.error(`DM gönderilemedi (${drawerId}):`, err.message);
     return false;
   }
 }
 
-/**
- * Çizim Tamamlandığında Resim İşleme ve DM Mesajını Silme
- */
-async function processDrawingSubmission(chatId, drawerId, base64ImageData) {
+// ─── Çizim Gönderim İşleyicisi ─────────────────────────────────────────────────
+async function processDrawingSubmission(chatId, drawerId, base64Image) {
   const game = games.get(chatId);
-  if (!game || game.status !== 'drawing') return false;
+  if (!game) { console.log(`[${chatId}] processDrawing: game yok`); return false; }
+  if (game.status !== 'drawing') { console.log(`[${chatId}] processDrawing: status=${game.status}, beklenen=drawing`); return false; }
 
-  if (game.timer) clearTimeout(game.timer);
+  console.log(`[${chatId}] Çizim alındı, gruba gönderiliyor...`);
+  clearGameTimer(game);
 
-  // DM Mesajını Sil
+  // DM sil
   const dmData = drawerToGroup.get(drawerId);
-  if (dmData && dmData.messageId) {
-    try {
-      await bot.telegram.deleteMessage(drawerId, dmData.messageId);
-    } catch (e) {}
+  if (dmData?.messageId) {
+    bot.telegram.deleteMessage(drawerId, dmData.messageId).catch(() => {});
+    drawerToGroup.delete(drawerId);
   }
 
-  const cleanBase64 = base64ImageData.replace(/^data:image\/\w+;base64,/, '');
+  const cleanBase64 = base64Image.replace(/^data:image\/\w+;base64,/, '');
   const imageBuffer = Buffer.from(cleanBase64, 'base64');
 
-  await bot.telegram.sendPhoto(
-    chatId,
-    { source: imageBuffer },
-    {
-      caption:
-        `🎨 *${game.drawer.username}* çizimini gönderdi!\n\n` +
-        `💬 Sadece oyuna katılanların tahminleri geçerlidir!\n` +
-        `⏱️ Tahmin Süresi: *60 saniye*`,
-      parse_mode: 'Markdown'
-    }
-  );
+  try {
+    await bot.telegram.sendPhoto(
+      chatId,
+      { source: imageBuffer },
+      {
+        caption:
+          `🎨 *${game.drawer.username}* çizimini gönderdi!\n\n` +
+          `💬 Sadece lobiye katılanların tahminleri geçerlidir!\n` +
+          `⏱️ Tahmin Süresi: *60 saniye*`,
+        parse_mode: 'Markdown'
+      }
+    );
+  } catch (err) {
+    console.error(`[${chatId}] Fotoğraf gönderilemedi:`, err.message);
+    return false;
+  }
 
+  // Status guessing yap
   game.status = 'guessing';
+  const currentWord = game.word;
+  const currentDrawer = game.drawer;
 
-  // 60 Saniyelik Tahmin Süresi
+  // 60s tahmin timer
+  clearGameTimer(game);
   game.timer = setTimeout(() => {
-    if (game.status !== 'guessing') return; // Zaten geçildi
-    game.status = 'transitioning'; // Önce kilitle! Yeni tahminleri engelle
-    const expiredWord = game.word;
+    if (game.status !== 'guessing') return;
+    console.log(`[${chatId}] Tahmin süresi doldu`);
+    game.status = 'transitioning';
     bot.telegram.sendMessage(
       chatId,
-      `⌛ *Süre Doldu!* Kimse doğru tahmini yapamadı.\n🔑 Cevap: *${expiredWord}* idi!\n\n` +
-      `⏳ 5 saniye içinde sonraki tura geçiliyor...`,
+      `⌛ *Süre Doldu!* Kimse bilemedi.\n🔑 Cevap: *${currentWord}* idi!\n\n⏳ 5 saniye içinde sonraki tur...`,
       { parse_mode: 'Markdown' }
-    );
-    setTimeout(() => { startNextTurn(chatId); }, 5000);
+    ).catch(() => {});
+    setTimeout(() => startNextTurn(chatId), 5000);
   }, 60000);
 
   return true;
 }
 
-/**
- * Tahmin Kontrolü & Sonraki Tura Otomatik Geçiş
- */
+// ─── Tahmin Handler ─────────────────────────────────────────────────────────────
 bot.on('text', (ctx, next) => {
   const chatId = ctx.chat.id;
   const game = games.get(chatId);
 
-  // Sadece 'guessing' durumunda işle — transitioning/drawing vb. engellensin!
+  // Sadece guessing modunda işle
   if (!game || game.status !== 'guessing') return next();
 
   const guesser = ctx.from;
-
-  if (guesser.id === game.drawer.id) return next();
-  if (!game.players.has(guesser.id)) return next();
+  if (guesser.id === game.drawer?.id) return next(); // Çizen tahmin edemez
+  if (!game.players.has(guesser.id)) return next();  // Lobiye katılmayanlar geçersiz
 
   const guess = ctx.message.text.trim().toLocaleLowerCase('tr');
-  const answer = game.word.trim().toLocaleLowerCase('tr');
+  const answer = (game.word || '').trim().toLocaleLowerCase('tr');
 
-  // DOĞRU TAHMİN!
   if (guess === answer) {
-    // Önce kilitle! Başka tahminler veya timer çift tetiklenemesin
+    // ÖNCE kilitle!
     game.status = 'transitioning';
-    if (game.timer) clearTimeout(game.timer);
+    clearGameTimer(game);
 
     const guesserName = guesser.username ? `@${guesser.username}` : guesser.first_name;
     const sc = game.scores.get(guesser.id) || { username: guesserName, points: 0 };
     sc.points += 10;
     game.scores.set(guesser.id, sc);
 
-    let board = '\n\n📊 *Mevcut Puan Durumu:*\n';
-    game.scores.forEach(s => { board += `• ${s.username}: *${s.points} Puan*\n`; });
+    let board = '\n\n📊 *Puan Durumu:*\n';
+    const sorted = Array.from(game.scores.values()).sort((a, b) => b.points - a.points);
+    sorted.forEach(s => { board += `• ${s.username}: *${s.points} Puan*\n`; });
 
     ctx.reply(
-      `🎉 *TEBRİKLER ${guesserName}!* Doğru tahmin!\n` +
-      `🔑 Kelime: *${game.word}* (+10 Puan)` + board +
-      `\n⏳ *5 saniye içinde sonraki tur başlayacak...*`,
+      `🎉 *TEBRİKLER ${guesserName}!* Doğru!\n🔑 Kelime: *${game.word}* (+10 Puan)` + board +
+      `\n⏳ 5 saniye içinde sonraki tur...`,
       { parse_mode: 'Markdown' }
-    );
+    ).catch(() => {});
 
-    // 5 sn sonra status zaten transitioning → startNextTurn güvenle çalışır
-    setTimeout(() => { startNextTurn(chatId); }, 5000);
+    setTimeout(() => startNextTurn(chatId), 5000);
   } else {
     return next();
   }
 });
 
-/**
- * /iptal Komutu
- */
+// ─── DM Butonu (Gruptan) ───────────────────────────────────────────────────────
+bot.action(/^getdm_(.+)$/, async (ctx) => {
+  const chatId = parseInt(ctx.match[1], 10);
+  const game = games.get(chatId);
+
+  if (!game || game.status !== 'drawing') {
+    return ctx.answerCbQuery('⚠️ Aktif çizim turu yok.', { show_alert: true });
+  }
+  if (game.drawer?.id !== ctx.from.id) {
+    return ctx.answerCbQuery('⚠️ Sıra sende değil!', { show_alert: true });
+  }
+
+  const ok = await sendDrawerDM(ctx.from.id, game.word, chatId);
+  ctx.answerCbQuery(ok ? '📩 DM\'ine gönderildi!' : '⚠️ DM gönderilemedi, bota /start yaz.', { show_alert: !ok });
+});
+
+// ─── web_app_data ───────────────────────────────────────────────────────────────
+bot.on('web_app_data', async (ctx) => {
+  try {
+    const drawerId = ctx.from.id;
+    const payload = JSON.parse(ctx.message.web_app_data.data);
+    const dmData = drawerToGroup.get(drawerId);
+    const targetChatId = parseInt(payload.chatId, 10) || (dmData ? dmData.chatId : null);
+    if (!targetChatId) return;
+    await processDrawingSubmission(targetChatId, drawerId, payload.image);
+  } catch (err) {
+    console.error('web_app_data hatası:', err);
+  }
+});
+
+// ─── /iptal ────────────────────────────────────────────────────────────────────
 bot.command('iptal', async (ctx) => {
   const chatId = ctx.chat.id;
   const game = games.get(chatId);
-
-  if (!game || game.status === 'idle') {
-    return ctx.reply('ℹ️ Aktif bir tur veya lobi bulunmuyor.');
-  }
+  if (!game || game.status === 'idle') return ctx.reply('ℹ️ Aktif oyun yok.');
 
   const userId = ctx.from.id;
   let isAdmin = false;
   try {
-    const member = await ctx.getChatMember(userId);
-    if (['administrator', 'creator'].includes(member.status) || userId === game.drawer?.id) {
-      isAdmin = true;
-    }
+    const m = await ctx.getChatMember(userId);
+    if (['administrator', 'creator'].includes(m.status) || userId === game.drawer?.id) isAdmin = true;
   } catch (_) {}
 
-  if (!isAdmin) {
-    return ctx.reply('⛔ Oyunu sadece grup yöneticileri veya o an çizen kişi iptal edebilir!');
+  if (!isAdmin) return ctx.reply('⛔ Sadece yöneticiler veya çizen kişi iptal edebilir!');
+
+  // Final skor tablosu
+  const sorted = Array.from(game.scores.values()).sort((a, b) => b.points - a.points);
+  let finalText = '🛑 *Oyun İptal Edildi!*\n\n';
+  if (sorted.length > 0) {
+    finalText += '🏆 *Final Skor Tablosu:*\n';
+    sorted.forEach((s, i) => {
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '•';
+      finalText += `${medal} ${s.username}: *${s.points} Puan*\n`;
+    });
   }
 
   resetGame(chatId);
-  return ctx.reply('🛑 Oyun turu ve lobi iptal edildi.');
+  return ctx.replyWithMarkdown(finalText);
 });
 
 function resetGame(chatId) {
   const game = games.get(chatId);
-  if (game) {
-    if (game.timer) clearTimeout(game.timer);
-    if (game.drawer) {
-      const dmData = drawerToGroup.get(game.drawer.id);
-      if (dmData && dmData.messageId) {
-        bot.telegram.deleteMessage(game.drawer.id, dmData.messageId).catch(() => {});
-      }
-      drawerToGroup.delete(game.drawer.id);
+  if (!game) return;
+
+  clearGameTimer(game);
+
+  if (game.drawer) {
+    const dmData = drawerToGroup.get(game.drawer.id);
+    if (dmData?.messageId) {
+      bot.telegram.deleteMessage(game.drawer.id, dmData.messageId).catch(() => {});
     }
-    game.status = 'idle';
-    game.players.clear();
-    game.drawnPlayerIds.clear();
-    game.cycleCount = 1;
-    game.totalRoundsPlayed = 0;
-    game.drawer = null;
-    game.word = null;
-    game.timer = null;
+    drawerToGroup.delete(game.drawer.id);
   }
+
+  games.delete(chatId);
 }
 
-// ─── Sunucu & Bot Başlat ──────────────────────────────────────────────────────
+// ─── Başlat ────────────────────────────────────────────────────────────────────
 server.listen(PORT, async () => {
   console.log(`🌐 HTTP Sunucusu ${PORT} portunda aktif!`);
   const me = await bot.telegram.getMe();
   botUsername = me.username;
   console.log(`🤖 Bot Başlatıldı: @${botUsername}`);
-  console.log(`🔗 WebApp HTTPS Bağlantısı: ${WEBAPP_URL}`);
+  console.log(`🔗 WebApp URL: ${WEBAPP_URL}`);
   bot.launch();
 });
 
