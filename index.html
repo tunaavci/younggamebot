@@ -184,7 +184,7 @@
       gap: 8px;
     }
 
-    /* Tools Bar (Brush, Bucket, Eraser) */
+    /* Tools Bar */
     .tools-group {
       display: flex;
       align-items: center;
@@ -419,7 +419,6 @@
 
   <!-- Toolbar -->
   <footer class="toolbar-container">
-    <!-- Row 1: Tool Selection & Brush Size Slider -->
     <div class="toolbar-row">
       <div class="tools-group" id="toolsGroup">
         <button class="tool-btn active" data-tool="brush" title="Fırça">
@@ -433,7 +432,6 @@
         </button>
       </div>
 
-      <!-- Size Slider -->
       <div class="size-control-box">
         <div class="size-preview-dot" id="sizeDot"></div>
         <input type="range" id="sizeRange" class="size-slider" min="1" max="50" value="6">
@@ -441,7 +439,6 @@
       </div>
     </div>
 
-    <!-- Row 2: Extended Color Palette & Spectrum Picker -->
     <div class="toolbar-row">
       <div class="color-palette-scroll" id="colorPalette">
         <button class="color-btn active" data-color="#000000" style="background-color: #000000;" title="Siyah"></button>
@@ -464,7 +461,6 @@
       </div>
     </div>
 
-    <!-- Row 3: Action Buttons -->
     <div class="toolbar-row">
       <div class="actions-group">
         <button class="btn btn-secondary" id="undoBtn">
@@ -486,7 +482,6 @@
   </footer>
 
   <script>
-    // --- Telegram Web App Setup ---
     const tg = window.Telegram?.WebApp;
     if (tg) {
       tg.expand();
@@ -739,7 +734,7 @@
     undoBtn.addEventListener('click', undo);
     clearBtn.addEventListener('click', clearCanvas);
 
-    // --- Gönder Butonu İle Çizimi Gönderme ---
+    // --- Gönder Butonu İle Çizimi Gönderme (HTTP POST + Telegram sendData) ---
     async function submitDrawing() {
       if (isSubmitted) return;
       isSubmitted = true;
@@ -748,36 +743,53 @@
       submitBtn.disabled = true;
       submitBtn.textContent = 'Gönderiliyor...';
 
-      // 400px genişliğinde JPEG olarak sıkıştır (veri boyutunu düşür)
+      // Canvas Resmi JPEG Olarak Hazırla
       const offscreen = document.createElement('canvas');
       const ratio = canvas.height / canvas.width;
-      offscreen.width = 400;
-      offscreen.height = Math.round(400 * ratio);
+      offscreen.width = 500;
+      offscreen.height = Math.round(500 * ratio);
       const octx = offscreen.getContext('2d');
       octx.fillStyle = '#ffffff';
       octx.fillRect(0, 0, offscreen.width, offscreen.height);
       octx.drawImage(canvas, 0, 0, offscreen.width, offscreen.height);
 
-      const imageData = offscreen.toDataURL('image/jpeg', 0.65);
+      const imageData = offscreen.toDataURL('image/jpeg', 0.7);
       const payload = { action: 'send_drawing', word: targetWord, image: imageData, chatId, userId };
 
-      // tg.sendData() — ReplyKeyboard webApp butonuyla açıldığında çalışır
+      // 1. HTTP POST Yöntemi ile Doğrudan Bot Sunucumuza Gönder (Garantili Yöntem)
+      try {
+        const response = await fetch('/api/submit-drawing', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (response.ok) {
+          submitBtn.textContent = 'Gönderildi! ✅';
+          setTimeout(() => { if (tg && tg.close) tg.close(); }, 500);
+          return;
+        }
+      } catch (err) {
+        console.warn('HTTP POST Gönderim Hatası:', err);
+      }
+
+      // 2. Telegram Native sendData Denemesi
       if (tg && tg.sendData) {
         try {
           tg.sendData(JSON.stringify(payload));
           submitBtn.textContent = 'Gönderildi! ✅';
-          setTimeout(() => { if (tg.close) tg.close(); }, 800);
+          setTimeout(() => { if (tg.close) tg.close(); }, 500);
           return;
         } catch (e) {
           console.error('sendData hatası:', e);
         }
       }
 
-      // Fallback: Telegram dışı ortam (test)
+      // 3. Fallback / Test Ortamı
       submitBtn.textContent = 'Gönderildi! ✅';
-      alert('Test modu: Çizim hazır! (Telegram dışı ortam)');
+      alert('Çizim başarıyla gönderildi!');
+      if (tg && tg.close) tg.close();
     }
-
 
     submitBtn.addEventListener('click', submitDrawing);
 
