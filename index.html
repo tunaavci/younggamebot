@@ -388,6 +388,20 @@
       flex: 2;
       box-shadow: 0 4px 14px rgba(99, 102, 241, 0.4);
     }
+
+    .btn-svg {
+      width: 18px;
+      height: 18px;
+      min-width: 18px;
+      min-height: 18px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      display: inline-block;
+      flex-shrink: 0;
+    }
   </style>
 </head>
 <body>
@@ -524,18 +538,39 @@
 
     function initCanvas() {
       const rect = wrapper.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      let tempImage = canvas.width > 0 && canvas.height > 0 ? ctx.getImageData(0, 0, canvas.width, canvas.height) : null;
+      if (rect.width === 0 || rect.height === 0) return;
 
-      canvas.width = rect.width * dpr;
-      canvas.height = rect.height * dpr;
+      const dpr = window.devicePixelRatio || 1;
+      const targetW = Math.floor(rect.width * dpr);
+      const targetH = Math.floor(rect.height * dpr);
+
+      // Boyut değişmediyse tuvali sıfırlama (renk seçici pencere açılınca çizim silinmesin!)
+      if (canvas.width === targetW && canvas.height === targetH && canvas.width > 0) {
+        return;
+      }
+
+      // Mevcut çizimi güvenli geçici tuvalde sakla
+      let tempCanvas = null;
+      if (canvas.width > 0 && canvas.height > 0) {
+        tempCanvas = document.createElement('canvas');
+        tempCanvas.width = canvas.width;
+        tempCanvas.height = canvas.height;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.drawImage(canvas, 0, 0);
+      }
+
+      canvas.width = targetW;
+      canvas.height = targetH;
       ctx.scale(dpr, dpr);
 
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, rect.width, rect.height);
 
-      if (tempImage) ctx.putImageData(tempImage, 0, 0);
-      else saveState();
+      if (tempCanvas) {
+        ctx.drawImage(tempCanvas, 0, 0, tempCanvas.width, tempCanvas.height, 0, 0, rect.width, rect.height);
+      } else {
+        saveState();
+      }
 
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
