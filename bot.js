@@ -22,6 +22,12 @@ let botUsername = '';
  * Key: chatId (Grup ID)
  */
 const games = new Map();
+
+/**
+ * Çizen Kullanıcı Eşleşmesi
+ * Key: drawerId (number)
+ * Value: { chatId: number, messageId: number }
+ */
 const drawerToGroup = new Map();
 
 // ─── Statik Dosya MIME Tablosu ─────────────────────────────────────────────────
@@ -36,7 +42,6 @@ const MIME = {
 
 // ─── HTTP Sunucusu: Statik Dosya + Canvas Resim Yükleme API ─────────────────────
 const server = http.createServer((req, res) => {
-  // CORS Başlıkları
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -47,7 +52,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 1. TWA Canvas Resim Gönderim API Endpoint (HTTP POST)
+  // TWA Canvas Resim Gönderim API Endpoint (HTTP POST)
   if (req.method === 'POST' && req.url === '/api/submit-drawing') {
     let body = '';
     req.on('data', chunk => { body += chunk.toString(); });
@@ -56,7 +61,9 @@ const server = http.createServer((req, res) => {
         const payload = JSON.parse(body);
         const { image, chatId, userId } = payload;
 
-        const targetChatId = parseInt(chatId, 10) || drawerToGroup.get(parseInt(userId, 10));
+        const drawerIdNum = parseInt(userId, 10);
+        const dmData = drawerToGroup.get(drawerIdNum);
+        const targetChatId = parseInt(chatId, 10) || (dmData ? dmData.chatId : null);
 
         if (!targetChatId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -64,7 +71,7 @@ const server = http.createServer((req, res) => {
           return;
         }
 
-        const success = await processDrawingSubmission(targetChatId, parseInt(userId, 10), image);
+        const success = await processDrawingSubmission(targetChatId, drawerIdNum, image);
 
         if (success) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -82,14 +89,12 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 2. Healthcheck Endpoint
   if (req.url === '/healthz') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('OK');
     return;
   }
 
-  // 3. Statik Dosyalar (index.html, vb.)
   const requestedFile = req.url.split('?')[0];
   const filePath = path.join(__dirname, requestedFile === '/' ? 'index.html' : requestedFile);
   serveFile(res, filePath);
@@ -131,7 +136,7 @@ bot.start(async (ctx) => {
     `2. Grupta */oyunbaslat* yazarak lobiyi aç.\n` +
     `3. Oyuncular katıldıktan sonra oyunu başlatın.\n` +
     `4. Çizen seçildiğinde DM'ine gelen çizim butonuna basıp çizimini yap!\n\n` +
-    `🚀 Hazırsın!`,
+    `🚀 Hazırsın! Gruplarda oynamaya başlayabilirsin.`,
     Markup.inlineKeyboard([
       [Markup.button.url('👥 Grubuna Ekle', `https://t.me/${botUsername}?startgroup=true`)]
     ])
@@ -276,7 +281,7 @@ bot.action(/^leave_lobby_(.+)$/, async (ctx) => {
 });
 
 /**
- * Oyunu Başlat Butonu (Lobiden Tur Başlatma)
+ * Oyunu Başlat Butonu
  */
 bot.action(/^start_game_(.+)$/, async (ctx) => {
   const chatId = parseInt(ctx.match[1], 10);
@@ -308,14 +313,13 @@ async function startNewTurn(chatId) {
   game.status = 'drawing';
   game.drawer = drawerUser;
   game.word = secretWord;
-  drawerToGroup.set(drawerUser.id, chatId);
 
   await bot.telegram.sendMessage(
     chatId,
     `🎨 *TUR BAŞLADI!*\n\n` +
     `👤 *Çizen:* ${drawerUser.username}\n` +
     `👥 *Oyundaki Tahminciler:* ${playerArray.map(p => p.username).join(', ')}\n\n` +
-    `📩 ${drawerUser.username} için özel mesaja çizim butonu gönderildi!`,
+    `📩 ${drawerUser.username} özel mesajına çizim linki gönderildi!`,
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
@@ -325,8 +329,15 @@ async function startNewTurn(chatId) {
     }
   );
 
-  // DM Gönder (Şık Inline WebApp Butonu İle)
-  await sendDrawerDM(drawerUser.id, secretWord, chatId);
+  // Otomatik DM Gönder
+  const dmSent = await sendDrawerDM(drawerUser.id, secretWord, chatId);
+  if (!dmSent) {
+    bot.telegram.sendMessage(
+      chatId,
+      `⚠️ *${drawerUser.username}*, sana özel mesaj gönderilemedi! Lütfen bota gidip /start yapın ve gruptaki butona tekrar basın.`,
+      { parse_mode: 'Markdown' }
+    );
+  }
 
   // 90 Saniyelik Çizim Süresi Zamanlayıcısı
   if (game.timer) clearTimeout(game.timer);
@@ -343,7 +354,7 @@ async function startNewTurn(chatId) {
 }
 
 /**
- * Gruptan "DM Buton Al" İsteyen Çizen İçin Karşılayıcı
+ * Gruptan "✏️ Çizime Başla" Butonuna Basıldığında DM Gönder
  */
 bot.action(/^get_dm_btn_(.+)$/, async (ctx) => {
   const chatId = parseInt(ctx.match[1], 10);
@@ -360,23 +371,32 @@ bot.action(/^get_dm_btn_(.+)$/, async (ctx) => {
 
   const success = await sendDrawerDM(clickerId, game.word, chatId);
   if (success) {
-    ctx.answerCbQuery('📩 Özel mesajına çizim butonu gönderildi!', { show_alert: true });
+    ctx.answerCbQuery('📩 Özel mesajına çizim linki gönderildi! DM kutunu kontrol et.', { show_alert: true });
   } else {
-    ctx.answerCbQuery('⚠️ Bot size özel mesaj gönderemiyor! Önce bota gidip /start basın.', { show_alert: true });
+    ctx.answerCbQuery('⚠️ Bot size özel mesaj gönderemiyor! Lütfen önce bota gidip /start basın.', { show_alert: true });
   }
 });
 
 /**
- * DM Üzerinden Çizene Şık Inline WebApp Butonu Gönderimi (Alt Klavye Kalabalığı Olmaz)
+ * DM Üzerinden Çizene Mesaj Gönder ve Message ID'sini Sakla
  */
 async function sendDrawerDM(drawerId, secretWord, chatId) {
   const twaUrl = `${WEBAPP_URL}/index.html?word=${encodeURIComponent(secretWord)}&chatId=${chatId}&userId=${drawerId}`;
 
+  // Varsa önceki DM mesajını sil
+  const oldDm = drawerToGroup.get(drawerId);
+  if (oldDm && oldDm.messageId) {
+    try {
+      await bot.telegram.deleteMessage(drawerId, oldDm.messageId);
+    } catch (_) {}
+  }
+
   try {
-    await bot.telegram.sendMessage(
+    const sentMsg = await bot.telegram.sendMessage(
       drawerId,
       `🎯 *Gizli Kelimen:* \`${secretWord}\`\n\n` +
-      `Aşağıdaki *🎨 Çizmeye Başla* butonuna basarak çizimini tamamla ve "Gönder"e bas!`,
+      `Aşağıdaki *🎨 Çizmeye Başla* butonuna basarak çizimini yap ve "Gönder" butonuna bas!\n` +
+      `_📌 Çizimini gönderdiğin an bu mesaj otomatik olarak silinecektir._`,
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
@@ -385,6 +405,8 @@ async function sendDrawerDM(drawerId, secretWord, chatId) {
       }
     );
 
+    // Eşleşmeyi ve mesaj ID'sini sakla
+    drawerToGroup.set(drawerId, { chatId, messageId: sentMsg.message_id });
     return true;
   } catch (err) {
     console.error('DM gönderilemedi:', err.message);
@@ -393,13 +415,23 @@ async function sendDrawerDM(drawerId, secretWord, chatId) {
 }
 
 /**
- * Ortak Resim İşleme ve Gruba İletme (HTTP POST & sendData Uyumlu)
+ * Çizim Tamamlandığında Resim İşleme ve DM Mesajını Silme
  */
 async function processDrawingSubmission(chatId, drawerId, base64ImageData) {
   const game = games.get(chatId);
   if (!game || game.status !== 'drawing') return false;
 
   if (game.timer) clearTimeout(game.timer);
+
+  // DM Mesajını Otomatik Sil!
+  const dmData = drawerToGroup.get(drawerId);
+  if (dmData && dmData.messageId) {
+    try {
+      await bot.telegram.deleteMessage(drawerId, dmData.messageId);
+    } catch (e) {
+      console.warn('DM mesajı silinemedi:', e.message);
+    }
+  }
 
   const cleanBase64 = base64ImageData.replace(/^data:image\/\w+;base64,/, '');
   const imageBuffer = Buffer.from(cleanBase64, 'base64');
@@ -441,18 +473,19 @@ bot.on('web_app_data', async (ctx) => {
     const rawData = ctx.message.web_app_data.data;
     const payload = JSON.parse(rawData);
 
-    const targetChatId = parseInt(payload.chatId, 10) || drawerToGroup.get(drawerId);
+    const dmData = drawerToGroup.get(drawerId);
+    const targetChatId = parseInt(payload.chatId, 10) || (dmData ? dmData.chatId : null);
+
     if (!targetChatId) return ctx.reply('⚠️ Grup bulunamadı.');
 
     await processDrawingSubmission(targetChatId, drawerId, payload.image);
-    await ctx.reply('✅ Çiziminiz gruba başarıyla iletildi!');
   } catch (err) {
     console.error('web_app_data Hatası:', err);
   }
 });
 
 /**
- * Tahmin Kontrolü (Sadece Katılan Oyuncuların Tahminleri Geçerli!)
+ * Tahmin Kontrolü
  */
 bot.on('text', (ctx, next) => {
   const chatId = ctx.chat.id;
@@ -526,7 +559,13 @@ function resetGame(chatId) {
   const game = games.get(chatId);
   if (game) {
     if (game.timer) clearTimeout(game.timer);
-    if (game.drawer) drawerToGroup.delete(game.drawer.id);
+    if (game.drawer) {
+      const dmData = drawerToGroup.get(game.drawer.id);
+      if (dmData && dmData.messageId) {
+        bot.telegram.deleteMessage(game.drawer.id, dmData.messageId).catch(() => {});
+      }
+      drawerToGroup.delete(game.drawer.id);
+    }
     game.status = 'idle';
     game.players.clear();
     game.drawer = null;
