@@ -20,14 +20,6 @@ let botUsername = '';
 /**
  * Oyun Durum Haritası (In-Memory Game State)
  * Key: chatId (Grup ID)
- * Value: {
- *   status: 'idle' | 'lobby' | 'drawing' | 'guessing',
- *   players: Map<userId, { id: number, username: string, name: string }>,
- *   drawer: { id: number, username: string, name: string },
- *   word: string,
- *   timer: TimeoutHandle,
- *   scores: Map<userId, { username: string, points: number }>
- * }
  */
 const games = new Map();
 const drawerToGroup = new Map();
@@ -235,7 +227,7 @@ async function renderLobbyMessage(ctx, chatId) {
       await ctx.reply(lobbyText, { parse_mode: 'Markdown', ...keyboard });
     }
   } catch (err) {
-    // Mesaj içeriği değişmediyse oluşan hatayı yut
+    // Mesaj değişmediğinde oluşan hatayı yut
   }
 }
 
@@ -309,7 +301,6 @@ async function startNewTurn(chatId) {
   const game = games.get(chatId);
   if (!game) return;
 
-  // Oyuncular arasından rastgele çizen seç
   const playerArray = Array.from(game.players.values());
   const drawerUser = playerArray[Math.floor(Math.random() * playerArray.length)];
   const secretWord = getRandomWord();
@@ -334,7 +325,7 @@ async function startNewTurn(chatId) {
     }
   );
 
-  // DM Gönder
+  // DM Gönder (Şık Inline WebApp Butonu İle)
   await sendDrawerDM(drawerUser.id, secretWord, chatId);
 
   // 90 Saniyelik Çizim Süresi Zamanlayıcısı
@@ -376,7 +367,7 @@ bot.action(/^get_dm_btn_(.+)$/, async (ctx) => {
 });
 
 /**
- * DM Üzerinden Çizene ReplyKeyboard / WebApp Gönderimi
+ * DM Üzerinden Çizene Şık Inline WebApp Butonu Gönderimi (Alt Klavye Kalabalığı Olmaz)
  */
 async function sendDrawerDM(drawerId, secretWord, chatId) {
   const twaUrl = `${WEBAPP_URL}/index.html?word=${encodeURIComponent(secretWord)}&chatId=${chatId}&userId=${drawerId}`;
@@ -385,18 +376,14 @@ async function sendDrawerDM(drawerId, secretWord, chatId) {
     await bot.telegram.sendMessage(
       drawerId,
       `🎯 *Gizli Kelimen:* \`${secretWord}\`\n\n` +
-      `Aşağıdaki "🎨 Çizmeye Başla" butonuna basarak çizimini tamamla ve "Gönder" butonuna bas!`,
-      { parse_mode: 'Markdown' }
-    );
-
-    // ReplyKeyboard Button
-    await bot.telegram.sendMessage(drawerId, '👇 Çizim ekranını aç:', {
-      reply_markup: {
-        keyboard: [[{ text: '🎨 Çizmeye Başla', web_app: { url: twaUrl } }]],
-        resize_keyboard: true,
-        one_time_keyboard: true
+      `Aşağıdaki *🎨 Çizmeye Başla* butonuna basarak çizimini tamamla ve "Gönder"e bas!`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.webApp('🎨 Çizmeye Başla', twaUrl)]
+        ])
       }
-    });
+    );
 
     return true;
   } catch (err) {
@@ -406,7 +393,7 @@ async function sendDrawerDM(drawerId, secretWord, chatId) {
 }
 
 /**
- * Ortak Resim İşleme ve Gruba İletme (Hem HTTP POST hem sendData Kullanır)
+ * Ortak Resim İşleme ve Gruba İletme (HTTP POST & sendData Uyumlu)
  */
 async function processDrawingSubmission(chatId, drawerId, base64ImageData) {
   const game = games.get(chatId);
@@ -458,7 +445,7 @@ bot.on('web_app_data', async (ctx) => {
     if (!targetChatId) return ctx.reply('⚠️ Grup bulunamadı.');
 
     await processDrawingSubmission(targetChatId, drawerId, payload.image);
-    await ctx.reply('✅ Çiziminiz gruba başarıyla iletildi!', { reply_markup: { remove_keyboard: true } });
+    await ctx.reply('✅ Çiziminiz gruba başarıyla iletildi!');
   } catch (err) {
     console.error('web_app_data Hatası:', err);
   }
@@ -475,12 +462,9 @@ bot.on('text', (ctx, next) => {
 
   const guesser = ctx.from;
 
-  // 1. Çizen kişi kendi kelimesini tahmin edemez
   if (guesser.id === game.drawer.id) return next();
 
-  // 2. Sadece Lobiye Katılan Oyuncular Tahmin Edebilir!
   if (!game.players.has(guesser.id)) {
-    // Katılmayan oyuncunun mesajını yok say (veya bilgilendir)
     return next();
   }
 
