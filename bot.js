@@ -7,7 +7,17 @@ const { getRandomWord } = require('./words');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
-const WEBAPP_URL = (process.env.WEBAPP_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+
+// HTTPS Güvencesi: Telegram WebApp butonları SADECE https:// kabul eder!
+let rawWebAppUrl = process.env.WEBAPP_URL || `http://localhost:${PORT}`;
+rawWebAppUrl = rawWebAppUrl.trim().replace(/\/$/, '');
+if (!rawWebAppUrl.startsWith('http://') && !rawWebAppUrl.startsWith('https://')) {
+  rawWebAppUrl = 'https://' + rawWebAppUrl;
+}
+if (rawWebAppUrl.startsWith('http://') && !rawWebAppUrl.includes('localhost')) {
+  rawWebAppUrl = rawWebAppUrl.replace('http://', 'https://');
+}
+const WEBAPP_URL = rawWebAppUrl;
 
 if (!BOT_TOKEN || BOT_TOKEN === 'YOUR_TELEGRAM_BOT_TOKEN_HERE') {
   console.error('❌ HATA: BOT_TOKEN tanımlı değil!');
@@ -314,30 +324,23 @@ async function startNewTurn(chatId) {
   game.drawer = drawerUser;
   game.word = secretWord;
 
+  // Grupta Yalnızca "Çizime Başla" Butonu Kalsın
   await bot.telegram.sendMessage(
     chatId,
     `🎨 *TUR BAŞLADI!*\n\n` +
     `👤 *Çizen:* ${drawerUser.username}\n` +
     `👥 *Oyundaki Tahminciler:* ${playerArray.map(p => p.username).join(', ')}\n\n` +
-    `📩 ${drawerUser.username} özel mesajına çizim linki gönderildi!`,
+    `📩 ${drawerUser.username} için özel mesaja çizim linki gönderildi!`,
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('✏️ Çizime Başla (DM Buton Al)', `get_dm_btn_${chatId}`)],
-        [Markup.button.url('💬 Bota /start Ver (Gerekirse)', `https://t.me/${botUsername}?start=1`)]
+        [Markup.button.callback('✏️ Çizime Başla', `get_dm_btn_${chatId}`)]
       ])
     }
   );
 
   // Otomatik DM Gönder
-  const dmSent = await sendDrawerDM(drawerUser.id, secretWord, chatId);
-  if (!dmSent) {
-    bot.telegram.sendMessage(
-      chatId,
-      `⚠️ *${drawerUser.username}*, sana özel mesaj gönderilemedi! Lütfen bota gidip /start yapın ve gruptaki butona tekrar basın.`,
-      { parse_mode: 'Markdown' }
-    );
-  }
+  await sendDrawerDM(drawerUser.id, secretWord, chatId);
 
   // 90 Saniyelik Çizim Süresi Zamanlayıcısı
   if (game.timer) clearTimeout(game.timer);
@@ -371,14 +374,14 @@ bot.action(/^get_dm_btn_(.+)$/, async (ctx) => {
 
   const success = await sendDrawerDM(clickerId, game.word, chatId);
   if (success) {
-    ctx.answerCbQuery('📩 Özel mesajına çizim linki gönderildi! DM kutunu kontrol et.', { show_alert: true });
+    ctx.answerCbQuery('📩 Özel mesajına çizim linki gönderildi!', { show_alert: false });
   } else {
-    ctx.answerCbQuery('⚠️ Bot size özel mesaj gönderemiyor! Lütfen önce bota gidip /start basın.', { show_alert: true });
+    ctx.answerCbQuery('⚠️ Özel mesaj gönderilemiyor. Lütfen bota özel mesaj atıp /start yapın.', { show_alert: true });
   }
 });
 
 /**
- * DM Üzerinden Çizene Mesaj Gönder ve Message ID'sini Sakla
+ * DM Üzerinden Çizene Mesaj Gönder
  */
 async function sendDrawerDM(drawerId, secretWord, chatId) {
   const twaUrl = `${WEBAPP_URL}/index.html?word=${encodeURIComponent(secretWord)}&chatId=${chatId}&userId=${drawerId}`;
@@ -396,7 +399,7 @@ async function sendDrawerDM(drawerId, secretWord, chatId) {
       drawerId,
       `🎯 *Gizli Kelimen:* \`${secretWord}\`\n\n` +
       `Aşağıdaki *🎨 Çizmeye Başla* butonuna basarak çizimini yap ve "Gönder" butonuna bas!\n` +
-      `_📌 Çizimini gönderdiğin an bu mesaj otomatik olarak silinecektir._`,
+      `_📌 Çizimini gönderdiğin an bu mesaj otomatik silinecektir._`,
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
@@ -405,11 +408,10 @@ async function sendDrawerDM(drawerId, secretWord, chatId) {
       }
     );
 
-    // Eşleşmeyi ve mesaj ID'sini sakla
     drawerToGroup.set(drawerId, { chatId, messageId: sentMsg.message_id });
     return true;
   } catch (err) {
-    console.error('DM gönderilemedi:', err.message);
+    console.error(`DM gönderilemedi (User ID: ${drawerId}):`, err.message);
     return false;
   }
 }
@@ -423,7 +425,7 @@ async function processDrawingSubmission(chatId, drawerId, base64ImageData) {
 
   if (game.timer) clearTimeout(game.timer);
 
-  // DM Mesajını Otomatik Sil!
+  // DM Mesajını Sil
   const dmData = drawerToGroup.get(drawerId);
   if (dmData && dmData.messageId) {
     try {
@@ -580,6 +582,7 @@ server.listen(PORT, async () => {
   const me = await bot.telegram.getMe();
   botUsername = me.username;
   console.log(`🤖 Bot Başlatıldı: @${botUsername}`);
+  console.log(`🔗 WebApp HTTPS Bağlantısı: ${WEBAPP_URL}`);
   bot.launch();
 });
 
