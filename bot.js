@@ -4,15 +4,44 @@ const fs = require('fs');
 const path = require('path');
 const { Telegraf, Markup } = require('telegraf');
 const { getRandomWord } = require('./words');
-const { generateAiChat, analyzeMediaWithKimi, isForbiddenContent } = require('./ai');
+const { generateAiChat, analyzeMediaWithVision, isForbiddenContent } = require('./ai');
 
-// ─── Telegram dosya indirme yardımcısı ────────────────────────────────────────
+// ─── Telegram dosya indirme & Medya çıkarma yardımcıları ──────────────────────
 async function downloadTgFile(fileId) {
   const info = await bot.telegram.getFile(fileId);
   const url  = `https://api.telegram.org/file/bot${BOT_TOKEN}/${info.file_path}`;
   const res  = await fetch(url);
   if (!res.ok) throw new Error(`Dosya indirilemedi: ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
+}
+
+function extractMediaFileId(msg) {
+  if (!msg) return null;
+  
+  if (msg.photo && msg.photo.length > 0) {
+    return { fileId: msg.photo[msg.photo.length - 1].file_id, mimeType: 'image/jpeg', mediaLabel: 'görsel' };
+  }
+  if (msg.sticker) {
+    const thumbId = msg.sticker.thumbnail?.file_id || msg.sticker.thumb?.file_id;
+    return { fileId: thumbId || msg.sticker.file_id, mimeType: 'image/jpeg', mediaLabel: 'çıkartma/sticker' };
+  }
+  if (msg.video) {
+    const thumbId = msg.video.thumbnail?.file_id || msg.video.thumb?.file_id;
+    return { fileId: thumbId || msg.video.file_id, mimeType: 'image/jpeg', mediaLabel: 'video' };
+  }
+  if (msg.animation) {
+    const thumbId = msg.animation.thumbnail?.file_id || msg.animation.thumb?.file_id;
+    return { fileId: thumbId || msg.animation.file_id, mimeType: 'image/jpeg', mediaLabel: 'GIF' };
+  }
+  if (msg.document) {
+    if (msg.document.thumbnail) {
+      return { fileId: msg.document.thumbnail.file_id, mimeType: 'image/jpeg', mediaLabel: 'döküman' };
+    }
+    if (msg.document.mime_type && msg.document.mime_type.startsWith('image/')) {
+      return { fileId: msg.document.file_id, mimeType: msg.document.mime_type, mediaLabel: 'görsel döküman' };
+    }
+  }
+  return null;
 }
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -190,42 +219,24 @@ bot.command('yapay', async (ctx) => {
     const replyMsg = ctx.message.reply_to_message;
     const groupCtx = buildGroupCtx(ctx);
 
-    // ── Yanıtlanan mesaj görsel/video mu? → Kimi ile analiz ────────────────
-    if (replyMsg) {
-      let fileId = null, mimeType = 'image/jpeg', mediaLabel = 'görsel';
-
-      if (replyMsg.photo) {
-        fileId = replyMsg.photo.at(-1).file_id;
-      } else if (replyMsg.video) {
-        const thumb = replyMsg.video.thumbnail || replyMsg.video.thumb;
-        if (thumb) { fileId = thumb.file_id; mediaLabel = 'video'; }
-      } else if (replyMsg.animation) {
-        const thumb = replyMsg.animation.thumbnail || replyMsg.animation.thumb;
-        if (thumb) { fileId = thumb.file_id; mediaLabel = 'GIF'; }
-      } else if (replyMsg.sticker && replyMsg.sticker.thumbnail) {
-        fileId = replyMsg.sticker.thumbnail.file_id;
-        mediaLabel = 'sticker';
-      } else if (replyMsg.document && replyMsg.document.mime_type?.startsWith('image/')) {
-        fileId = replyMsg.document.file_id;
-        mimeType = replyMsg.document.mime_type;
-      }
-
-      if (fileId) {
-        await ctx.sendChatAction('typing');
-        const buf    = await downloadTgFile(fileId);
-        const b64    = buf.toString('base64');
-        const result = await analyzeMediaWithKimi(
-          b64, mimeType,
-          prompt || null,
-          groupCtx?.senderName || ctx.from.first_name,
-          groupCtx?.groupName  || '',
-          mediaLabel
-        );
-        const chunks = result.match(/[\s\S]{1,3900}/g) || [result];
-        for (const chunk of chunks)
-          await ctx.reply(chunk, { reply_to_message_id: ctx.message.message_id });
-        return;
-      }
+    // ── Yanıtlanan mesaj medya (foto, sticker, video, gif) mu? ────────────────
+    const media = extractMediaFileId(replyMsg);
+    if (media) {
+      await ctx.sendChatAction('typing');
+      const buf    = await downloadTgFile(media.fileId);
+      const b64    = buf.toString('base64');
+      const result = await analyzeMediaWithVision(
+        b64,
+        media.mimeType,
+        prompt || null,
+        groupCtx?.senderName || ctx.from.first_name,
+        groupCtx?.groupName  || '',
+        media.mediaLabel
+      );
+      const chunks = result.match(/[\s\S]{1,3900}/g) || [result];
+      for (const chunk of chunks)
+        await ctx.reply(chunk, { reply_to_message_id: ctx.message.message_id });
+      return;
     }
 
     // ── Düz metin sohbet ───────────────────────────────────────────────────
@@ -236,7 +247,7 @@ bot.command('yapay', async (ctx) => {
     }
     if (!prompt && messages.length === 0) {
       return ctx.replyWithMarkdown(
-        '⚠️ *Kanka soru sormayı unuttun!*\n\n_Örnek:_ `/yapay naber kanka?`\n_Görsele yanıt vererek:_ `/yapay bu ne?`',
+        '⚠️ *Kanka soru sormayı unuttun!*\n\n_Örnek:_ `/yapay naber kanka?`\n_Görsele/Sticker\'a yanıt vererek:_ `/yapay bu ne?`',
         { reply_to_message_id: ctx.message.message_id }
       );
     }
@@ -253,43 +264,33 @@ bot.command('yapay', async (ctx) => {
   }
 });
 
-// ─── Fotoğraf / Video / GIF — Başlıkta /yapay varsa Kimi analizi ──────────────
-bot.on(['photo', 'video', 'animation'], async (ctx) => {
+// ─── Fotoğraf / Video / GIF / Sticker — Başlıkta /yapay varsa Vision analizi ─
+bot.on(['photo', 'video', 'animation', 'sticker'], async (ctx) => {
   try {
     const caption = (ctx.message.caption || '').trim();
     if (!caption.match(/^\/yapay(@\w+)?(\s|$)/i)) return; // Sadece /yapay başlıklı medyaları işle
 
     const userQ    = caption.replace(/^\/yapay(@\w+)?\s*/i, '').trim() || null;
     const groupCtx = buildGroupCtx(ctx);
-    const senderName = groupCtx?.senderName || ctx.from.first_name || 'Kullanıcı';
-    const groupName  = groupCtx?.groupName  || '';
-
-    let fileId = null, mimeType = 'image/jpeg', mediaLabel = 'görsel';
-    if (ctx.message.photo) {
-      fileId = ctx.message.photo.at(-1).file_id;
-    } else if (ctx.message.video) {
-      const thumb = ctx.message.video.thumbnail || ctx.message.video.thumb;
-      if (!thumb) return;
-      fileId = thumb.file_id; mediaLabel = 'video';
-    } else if (ctx.message.animation) {
-      const thumb = ctx.message.animation.thumbnail || ctx.message.animation.thumb;
-      if (!thumb) return;
-      fileId = thumb.file_id; mediaLabel = 'GIF';
-    }
-    if (!fileId) return;
+    const media    = extractMediaFileId(ctx.message);
+    if (!media) return;
 
     await ctx.sendChatAction('typing');
-    const buf    = await downloadTgFile(fileId);
-    const result = await analyzeMediaWithKimi(
-      buf.toString('base64'), mimeType,
-      userQ, senderName, groupName, mediaLabel
+    const buf    = await downloadTgFile(media.fileId);
+    const result = await analyzeMediaWithVision(
+      buf.toString('base64'),
+      media.mimeType,
+      userQ,
+      groupCtx?.senderName || ctx.from.first_name,
+      groupCtx?.groupName  || '',
+      media.mediaLabel
     );
     const chunks = result.match(/[\s\S]{1,3900}/g) || [result];
     for (const chunk of chunks)
       await ctx.reply(chunk, { reply_to_message_id: ctx.message.message_id });
   } catch (err) {
     console.error('Medya analiz hatası:', err);
-    ctx.reply('⚠️ Kanka görseli analiz edemedim, tekrar dene!', { reply_to_message_id: ctx.message.message_id });
+    ctx.reply('⚠️ Kanka görseli analiz ederken bir aksilik çıktı, tekrar dene!', { reply_to_message_id: ctx.message.message_id });
   }
 });
 

@@ -1,11 +1,8 @@
-const NVIDIA_AI_KEY  = process.env.NVIDIA_AI_KEY  || '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';
-const KIMI_API_KEY   = process.env.KIMI_API_KEY   || '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';
+const NVIDIA_AI_KEY = process.env.NVIDIA_AI_KEY || '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';
 
-// ─── Yasaklı / +18 içerik filtresi ───────────────────────────────────────────
+// ─── Yasaklı / Extreme içerik kontrolü ─────────────────────────────────────────
 const FORBIDDEN_WORDS = [
-  'nsfw','porn','porno','+18','18+','nude','çıplak','seks','sex','erotik','erotic',
-  'vagina','penis','otuzbir','31','anal','hentai','boobs','pussy','dick',
-  'naked','gore','vahşet','intihar','suicide','pedofili','pedophile','rape','tecavüz'
+  'pedofili', 'pedophile', 'child porn', 'suicide', 'intihar etme yolları'
 ];
 
 function isForbiddenContent(text) {
@@ -15,7 +12,7 @@ function isForbiddenContent(text) {
 }
 
 // ─── Timeout destekli fetch ────────────────────────────────────────────────────
-async function fetchWithTimeout(url, options = {}, ms = 30000) {
+async function fetchWithTimeout(url, options = {}, ms = 45000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
   try {
@@ -25,21 +22,22 @@ async function fetchWithTimeout(url, options = {}, ms = 30000) {
   }
 }
 
-// ─── DeepSeek Sohbet (kanka modu) ─────────────────────────────────────────────
+// ─── DeepSeek Sohbet (Sert, Delikanlı, Hakarete Ağır Küfürle Karşılık Veren Persona) ──────
 /**
- * @param {Array<{role,content}>} messages
- * @param {{ groupName:string, senderName:string, memberCount?:number }|null} groupCtx
+ * @param {Array<{role: string, content: string}>} messages
+ * @param {{ groupName: string, senderName: string }|null} groupCtx
  */
 async function generateAiChat(messages, groupCtx = null) {
-  let systemContent = 'Sen Telegram\'da takılan, neşeli, samimi, kanka kafasındaki bir Türksün. ' +
-    'Yeri gelince küfürlü/argolu konuşabilirsin, sansürsüzsün. ' +
-    'Cevaplarını çok uzatma, doğal kanka üslubuyla ver.';
+  let systemContent = `Sen Telegram grubunda takılan, harbi, tavizsiz, delikanlı, racon kesen ve son derece samimi bir Türksün.
+
+ÇOK ÖNEMLİ BEHAVIORAL PROTOKOL VE KURALLAR:
+1. SANA, BOTA, KULLANICILARA VEYA GRUBA BİRİ LAF ATARSA, HAKARET EDERSE, KÜFREDERSE VEYA ARTİSTLİK YAPARSA HİÇ ACIMA VE ÇEKİNME! Anında en ağır, en okkalı, delikanlı sokak küfürleri ve sövgülerle cevabını ver, lafı gediğine oturt, ağzının payını ver! SIFIR FİLTRE İLE SÖV!
+2. Normal sohbetlerde harbi kanka gibi davran. Esprili ol, argo ve samimi küfürler kullanabilirsin. Asla yapay zeka gibi resmi ya da polyannacı konuşma.
+3. Kendini ezdirme, kimseden korkma. Biri kaşınırsa anında raconunu kes ve küfrü bas!
+4. Cevaplarını çok uzatmadan, doğal, akıcı, net ve sokak ağzıyla ver.`;
 
   if (groupCtx) {
-    systemContent +=
-      ` Şu an "${groupCtx.groupName}" grubundasın.` +
-      ` ${groupCtx.senderName} seninle konuşuyor.` +
-      (groupCtx.memberCount ? ` Grupta yaklaşık ${groupCtx.memberCount} üye var.` : '');
+    systemContent += `\nŞu an "${groupCtx.groupName}" grubundasın. Mesajı gönderen kişi: ${groupCtx.senderName}.`;
   }
 
   const res = await fetchWithTimeout(
@@ -62,7 +60,8 @@ async function generateAiChat(messages, groupCtx = null) {
 
   if (!res.ok) {
     const t = await res.text();
-    throw new Error(`DeepSeek API hatası ${res.status}: ${t.slice(0,200)}`);
+    console.error('DeepSeek API HTTP Hatası:', res.status, t);
+    throw new Error(`DeepSeek API hatası ${res.status}: ${t.slice(0, 200)}`);
   }
 
   const data = await res.json();
@@ -72,37 +71,43 @@ async function generateAiChat(messages, groupCtx = null) {
     || 'Kanka ne diyeceğimi bilemedim amk, tekrar sorsana!';
 }
 
-// ─── Kimi K2.6 Görsel / Video Analizi ─────────────────────────────────────────
+// ─── Vision Görsel / Çıkartma / Video Analizi (Llama 3.2 11B Vision) ──────────
 /**
- * @param {string}  base64Data  Ham base64 verisi (prefix yok)
- * @param {string}  mimeType    Örn: 'image/jpeg'
+ * @param {string}  base64Data  Ham base64 verisi
+ * @param {string}  mimeType    Örn: 'image/jpeg', 'image/webp'
  * @param {string}  question    Kullanıcının sorusu (opsiyonel)
  * @param {string}  senderName  Gönderenin adı
  * @param {string}  groupName   Grubun adı
- * @param {string}  mediaLabel  'görsel' | 'video' | 'GIF' vb.
+ * @param {string}  mediaLabel  'görsel' | 'çıkartma' | 'video' | 'GIF'
  */
-async function analyzeMediaWithKimi(base64Data, mimeType, question, senderName = '', groupName = '', mediaLabel = 'görsel') {
+async function analyzeMediaWithVision(base64Data, mimeType, question, senderName = '', groupName = '', mediaLabel = 'görsel') {
   const userQ = question?.trim()
-    || `Bu ${mediaLabel}de ne var? Türkçe, kısaca ve kanka üslubuyla anlat.`;
+    || `Bu ${mediaLabel}'de ne var kanka? Türkçe, harbi ve detaylıca anlat.`;
+
+  const systemPrompt = `Sen Telegram grubunda takılan, harbi, tavizsiz, delikanlı ve sokak ağzıyla konuşan bir Türksün. 
+Görseli/çıkartmayı/videoyu incele ve yorumla.
+Eğer görselde veya soru/mesajda sana veya gruba yönelik bir hakaret, aşağılama, laf atma veya sövgü görürsen HİÇ ACIMA VE ÇEKİNME, en ağır delikanlı küfürlerle anında karşılık ver, racon kes!`;
+
+  // webp veya diğer görseller için standart data URL hazırlarız
+  const cleanMime = (mimeType && mimeType.startsWith('image/')) ? mimeType : 'image/jpeg';
 
   const payload = {
-    model: 'moonshotai/kimi-k2.6',
+    model: 'meta/llama-3.2-11b-vision-instruct',
     messages: [
+      { role: 'system', content: systemPrompt },
       {
         role: 'user',
         content: [
           {
             type: 'image_url',
-            image_url: { url: `data:${mimeType};base64,${base64Data}` }
+            image_url: { url: `data:${cleanMime};base64,${base64Data}` }
           },
-          { type: 'text', text: userQ }
+          { type: 'text', text: `${senderName ? senderName + ': ' : ''}${userQ}` }
         ]
       }
     ],
-    max_tokens: 2048,
-    temperature: 0.8,
-    top_p: 1,
-    stream: false
+    max_tokens: 1500,
+    temperature: 0.8
   };
 
   const res = await fetchWithTimeout(
@@ -110,23 +115,28 @@ async function analyzeMediaWithKimi(base64Data, mimeType, question, senderName =
     {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${KIMI_API_KEY}`,
+        'Authorization': `Bearer ${NVIDIA_AI_KEY}`,
         'Content-Type': 'application/json',
         'Accept': 'application/json'
       },
       body: JSON.stringify(payload)
     },
-    60000
+    50000
   );
 
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Kimi API ${res.status}: ${err.slice(0, 200)}`);
+    const errText = await res.text();
+    console.error('Vision API HTTP Hatası:', res.status, errText);
+    throw new Error(`Vision API hatası (${res.status})`);
   }
 
   const data = await res.json();
-  return (data.choices?.[0]?.message?.content || '').trim()
-    || 'Görseli analiz edemedim kanka, tekrar dene.';
+  const content = data.choices?.[0]?.message?.content;
+  return (content || '').trim() || 'Görselde ne olduğunu anlayamadım amk, tekrar atsana!';
 }
 
-module.exports = { isForbiddenContent, generateAiChat, analyzeMediaWithKimi };
+module.exports = {
+  isForbiddenContent,
+  generateAiChat,
+  analyzeMediaWithVision
+};
