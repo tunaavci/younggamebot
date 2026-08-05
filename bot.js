@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Telegraf, Markup } = require('telegraf');
 const { getRandomWord } = require('./words');
+const { generateAiChat, generateAiImage, isForbiddenContent } = require('./ai');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
@@ -132,25 +133,129 @@ function clearGameTimer(game) {
 bot.start(async (ctx) => {
   const firstName = ctx.from.first_name || 'Oyuncu';
   return ctx.replyWithMarkdown(
-    `👋 *Merhaba ${firstName}!* Çiz Tahmin Et oyun botuna hoş geldin!\n\n` +
-    `🎮 *Nasıl Oynanır?*\n` +
+    `👋 *Merhaba ${firstName}!* Botumuza Hoş Geldin!\n\n` +
+    `🎮 *Oyun Modu:*\n` +
     `1. Beni bir Telegram grubuna ekle ve yönetici yap.\n` +
     `2. Grupta */oyunbaslat* yazarak lobiyi aç.\n` +
     `3. Oyuncular katıldıktan sonra oyunu başlatın.\n` +
-    `4. Sıra sana gelince DM'ine gelen butonla çizimini yap!\n` +
-    `5. Oyun */iptal* yazana kadar sürekli döner.\n\n` +
+    `4. Sıra sana gelince DM'ine gelen butonla çizimini yap!\n\n` +
+    `🤖 *Yapay Zeka Özellikleri:*\n` +
+    `• */ai <soru>* — DeepSeek AI ile kanka modunda sohbet et\n` +
+    `• */image <tarif>* — AI ile görsel oluştur (örn: /image bana bir baykuş görseli oluştur)\n\n` +
     `🚀 Hazırsın!`,
     Markup.inlineKeyboard([[Markup.button.url('👥 Grubuna Ekle', `https://t.me/${botUsername}?startgroup=true`)]])
   );
 });
 
 bot.command('help', (ctx) => ctx.replyWithMarkdown(
-  `🎨 *Çiz Tahmin Et — Yardım*\n\n` +
+  `🤖 *Bot Komutları & Yardım*\n\n` +
+  `🎮 *Çiz Tahmin Et Oyun Komutları:*\n` +
   `• /oyunbaslat — Lobi açar\n` +
-  `• /iptal — Oyunu bitirir _(yöneticiler)_\n` +
-  `• /help — Bu menü\n\n` +
-  `⚠️ Botun grup mesajlarını okuyabilmesi için **yönetici** yapılması gerekmektedir.`
+  `• /iptal — Oyunu bitirir _(yöneticiler)_\n\n` +
+  `🧠 *Yapay Zeka Komutları:*\n` +
+  `• /ai <soru> — DeepSeek AI ile kanka modunda sohbet et _(Yanıtlanan mesajlara da cevap verir)_\n` +
+  `• /image <tarif> — Yapay zeka ile görsel üret _(Örn: /image bana bir baykuş görseli oluştur)_\n\n` +
+  `• /help — Bu menüyü gösterir\n\n` +
+  `⚠️ Botun grup mesajlarını okuyabilmesi için **yönetici** yapılması önerilir.`
 ));
+
+// ─── Yapay Zeka Sohbet Komutu (/ai) ──────────────────────────────────────────
+bot.command('ai', async (ctx) => {
+  try {
+    let prompt = ctx.message.text.replace(/^\/ai(@\w+)?\s*/i, '').trim();
+
+    // Yanıtlanan mesaj kontrolü
+    const replyMsg = ctx.message.reply_to_message;
+    const messages = [];
+
+    if (replyMsg) {
+      const replyText = replyMsg.text || replyMsg.caption || '';
+      if (replyText) {
+        messages.push({
+          role: 'user',
+          content: `[Yanıtlanan Mesaj - ${replyMsg.from?.first_name || 'Kullanıcı'}]: ${replyText}`
+        });
+      }
+    }
+
+    if (!prompt && messages.length === 0) {
+      return ctx.replyWithMarkdown(
+        '⚠️ *Kanka soru sormayı unuttun!*\n\n_Örnek kullanım:_\n`/ai naber kanka?` veya bir mesaja yanıt vererek `/ai buna ne diyorsun`',
+        { reply_to_message_id: ctx.message.message_id }
+      );
+    }
+
+    if (prompt) {
+      messages.push({ role: 'user', content: prompt });
+    }
+
+    await ctx.sendChatAction('typing');
+
+    const replyText = await generateAiChat(messages);
+
+    // Telegram 4000+ karakter sınırı kontrolü
+    if (replyText.length > 4000) {
+      const chunks = replyText.match(/[\s\S]{1,3900}/g) || [replyText];
+      for (const chunk of chunks) {
+        await ctx.reply(chunk, { reply_to_message_id: ctx.message.message_id });
+      }
+    } else {
+      await ctx.reply(replyText, { reply_to_message_id: ctx.message.message_id });
+    }
+  } catch (err) {
+    console.error('/ai komut hatası:', err);
+    return ctx.reply('⚠️ Kanka beyin fırtınası yaparken bir aksilik çıktı amk, tekrar dene!', { reply_to_message_id: ctx.message.message_id });
+  }
+});
+
+// ─── Yapay Zeka Görsel Üretim Komutu (/image) ─────────────────────────────────
+bot.command('image', async (ctx) => {
+  try {
+    let prompt = ctx.message.text.replace(/^\/image(@\w+)?\s*/i, '').trim();
+
+    if (!prompt) {
+      return ctx.replyWithMarkdown(
+        '⚠️ *Kanka ne görseli oluşturacağımı yazmadın!*\n\n_Örnek kullanım:_\n`/image bana bir baykuş görseli oluştur`',
+        { reply_to_message_id: ctx.message.message_id }
+      );
+    }
+
+    // Moderasyon Filtresi Kontrolü (+18 / Yasaklı İçerik)
+    if (isForbiddenContent(prompt)) {
+      return ctx.replyWithMarkdown(
+        '🔞 *Kanka bu tarz +18 veya yasaklı görseller oluşturamam!*\n\n' +
+        'Düzgün ve kurallara uygun bir görsel iste bakayım. 😉',
+        { reply_to_message_id: ctx.message.message_id }
+      );
+    }
+
+    await ctx.sendChatAction('upload_photo');
+    const waitingMsg = await ctx.reply('🎨 *Görseliniz çiziliyor kanka, bekle biraz...*', {
+      parse_mode: 'Markdown',
+      reply_to_message_id: ctx.message.message_id
+    });
+
+    const imgBuffer = await generateAiImage(prompt);
+
+    await ctx.sendChatAction('upload_photo');
+    await ctx.replyWithPhoto(
+      { source: imgBuffer },
+      {
+        caption: `🎨 *Görselin Hazır Kanka!*\n📝 *İstek:* \`${prompt}\``,
+        parse_mode: 'Markdown',
+        reply_to_message_id: ctx.message.message_id
+      }
+    );
+
+    // Bekleme mesajını sil
+    if (waitingMsg?.message_id) {
+      ctx.deleteMessage(waitingMsg.message_id).catch(() => {});
+    }
+  } catch (err) {
+    console.error('/image komut hatası:', err);
+    return ctx.reply('⚠️ Kanka görseli çizerken tuval devrildi amk, tekrar dene!', { reply_to_message_id: ctx.message.message_id });
+  }
+});
 
 bot.command('oyunbaslat', async (ctx) => {
   const chatId = ctx.chat.id;
@@ -519,13 +624,17 @@ function resetGame(chatId) {
 }
 
 // ─── Başlat ────────────────────────────────────────────────────────────────────
+bot.catch((err, ctx) => {
+  console.error(`Bot Hatası (${ctx.updateType}):`, err);
+});
+
 server.listen(PORT, async () => {
   console.log(`🌐 HTTP Sunucusu ${PORT} portunda aktif!`);
   const me = await bot.telegram.getMe();
   botUsername = me.username;
   console.log(`🤖 Bot Başlatıldı: @${botUsername}`);
   console.log(`🔗 WebApp URL: ${WEBAPP_URL}`);
-  bot.launch();
+  bot.launch({ dropPendingUpdates: true });
 });
 
 process.once('SIGINT', () => { bot.stop('SIGINT'); server.close(); });
