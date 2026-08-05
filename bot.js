@@ -4,7 +4,16 @@ const fs = require('fs');
 const path = require('path');
 const { Telegraf, Markup } = require('telegraf');
 const { getRandomWord } = require('./words');
-const { generateAiChat, generateAiImage, isForbiddenContent, checkImageCooldown, setImageCooldown, resetImageCooldown } = require('./ai');
+const { generateAiChat, analyzeMediaWithKimi, isForbiddenContent } = require('./ai');
+
+// ─── Telegram dosya indirme yardımcısı ────────────────────────────────────────
+async function downloadTgFile(fileId) {
+  const info = await bot.telegram.getFile(fileId);
+  const url  = `https://api.telegram.org/file/bot${BOT_TOKEN}/${info.file_path}`;
+  const res  = await fetch(url);
+  if (!res.ok) throw new Error(`Dosya indirilemedi: ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
@@ -140,8 +149,8 @@ bot.start(async (ctx) => {
     `3. Oyuncular katıldıktan sonra oyunu başlatın.\n` +
     `4. Sıra sana gelince DM'ine gelen butonla çizimini yap!\n\n` +
     `🤖 *Yapay Zeka Özellikleri:*\n` +
-    `• */ai <soru>* — DeepSeek AI ile kanka modunda sohbet et\n` +
-    `• */image <tarif>* — AI ile görsel oluştur (örn: /image bana bir baykuş görseli oluştur)\n\n` +
+    `• */yapay <soru>* — DeepSeek AI ile kanka modunda sohbet et\n` +
+    `• *Görsel/Video gönder + başlığa /yapay yaz* — Kimi K2.6 ile analiz et\n\n` +
     `🚀 Hazırsın!`,
     Markup.inlineKeyboard([[Markup.button.url('👥 Grubuna Ekle', `https://t.me/${botUsername}?startgroup=true`)]])
   );
@@ -153,127 +162,134 @@ bot.command('help', (ctx) => ctx.replyWithMarkdown(
   `• /oyunbaslat — Lobi açar\n` +
   `• /iptal — Oyunu bitirir _(yöneticiler)_\n\n` +
   `🧠 *Yapay Zeka Komutları:*\n` +
-  `• /ai <soru> — DeepSeek AI ile kanka modunda sohbet et _(Yanıtlanan mesajlara da cevap verir)_\n` +
-  `• /image <tarif> — Yapay zeka ile görsel üret _(Örn: /image bana bir baykuş görseli oluştur)_\n\n` +
+  `• /yapay <soru> — DeepSeek AI ile kanka modunda sohbet et\n` +
+  `  ↳ Bir mesajı yanıtlayarak da çalışır\n` +
+  `• Görsel/Video gönder — Başlığa \`/yapay <soru>\` yaz, Kimi K2.6 analiz eder\n` +
+  `  ↳ Ya da bir görsele yanıt vererek \`/yapay <soru>\` yaz\n\n` +
   `• /help — Bu menüyü gösterir\n\n` +
   `⚠️ Botun grup mesajlarını okuyabilmesi için **yönetici** yapılması önerilir.`
 ));
 
-// ─── Yapay Zeka Sohbet Komutu (/ai) ──────────────────────────────────────────
-bot.command('ai', async (ctx) => {
+// ─── Yardımcı: Grup bağlamı oluştur ──────────────────────────────────────────
+function buildGroupCtx(ctx) {
+  if (ctx.chat.type === 'private') return null;
+  const sender = ctx.from;
+  const senderName = [sender.first_name, sender.last_name].filter(Boolean).join(' ')
+    || sender.username || 'Kullanıcı';
+  return {
+    groupName:   ctx.chat.title || 'Grup',
+    senderName,
+    memberCount: null   // getmembercount pahalı, sadece gerekince çağırılsın
+  };
+}
+
+// ─── /yapay — Sohbet Komutu ────────────────────────────────────────────────────
+bot.command('yapay', async (ctx) => {
   try {
-    let prompt = ctx.message.text.replace(/^\/ai(@\w+)?\s*/i, '').trim();
-
-    // Yanıtlanan mesaj kontrolü
+    const prompt   = ctx.message.text.replace(/^\/yapay(@\w+)?\s*/i, '').trim();
     const replyMsg = ctx.message.reply_to_message;
-    const messages = [];
+    const groupCtx = buildGroupCtx(ctx);
 
+    // ── Yanıtlanan mesaj görsel/video mu? → Kimi ile analiz ────────────────
     if (replyMsg) {
-      const replyText = replyMsg.text || replyMsg.caption || '';
-      if (replyText) {
-        messages.push({
-          role: 'user',
-          content: `[Yanıtlanan Mesaj - ${replyMsg.from?.first_name || 'Kullanıcı'}]: ${replyText}`
-        });
+      let fileId = null, mimeType = 'image/jpeg', mediaLabel = 'görsel';
+
+      if (replyMsg.photo) {
+        fileId = replyMsg.photo.at(-1).file_id;
+      } else if (replyMsg.video) {
+        const thumb = replyMsg.video.thumbnail || replyMsg.video.thumb;
+        if (thumb) { fileId = thumb.file_id; mediaLabel = 'video'; }
+      } else if (replyMsg.animation) {
+        const thumb = replyMsg.animation.thumbnail || replyMsg.animation.thumb;
+        if (thumb) { fileId = thumb.file_id; mediaLabel = 'GIF'; }
+      } else if (replyMsg.sticker && replyMsg.sticker.thumbnail) {
+        fileId = replyMsg.sticker.thumbnail.file_id;
+        mediaLabel = 'sticker';
+      } else if (replyMsg.document && replyMsg.document.mime_type?.startsWith('image/')) {
+        fileId = replyMsg.document.file_id;
+        mimeType = replyMsg.document.mime_type;
+      }
+
+      if (fileId) {
+        await ctx.sendChatAction('typing');
+        const buf    = await downloadTgFile(fileId);
+        const b64    = buf.toString('base64');
+        const result = await analyzeMediaWithKimi(
+          b64, mimeType,
+          prompt || null,
+          groupCtx?.senderName || ctx.from.first_name,
+          groupCtx?.groupName  || '',
+          mediaLabel
+        );
+        const chunks = result.match(/[\s\S]{1,3900}/g) || [result];
+        for (const chunk of chunks)
+          await ctx.reply(chunk, { reply_to_message_id: ctx.message.message_id });
+        return;
       }
     }
 
+    // ── Düz metin sohbet ───────────────────────────────────────────────────
+    const messages = [];
+    if (replyMsg) {
+      const rt = replyMsg.text || replyMsg.caption || '';
+      if (rt) messages.push({ role: 'user', content: `[${replyMsg.from?.first_name || 'Önceki mesaj'}]: ${rt}` });
+    }
     if (!prompt && messages.length === 0) {
       return ctx.replyWithMarkdown(
-        '⚠️ *Kanka soru sormayı unuttun!*\n\n_Örnek kullanım:_\n`/ai naber kanka?` veya bir mesaja yanıt vererek `/ai buna ne diyorsun`',
+        '⚠️ *Kanka soru sormayı unuttun!*\n\n_Örnek:_ `/yapay naber kanka?`\n_Görsele yanıt vererek:_ `/yapay bu ne?`',
         { reply_to_message_id: ctx.message.message_id }
       );
     }
-
-    if (prompt) {
-      messages.push({ role: 'user', content: prompt });
-    }
+    if (prompt) messages.push({ role: 'user', content: prompt });
 
     await ctx.sendChatAction('typing');
-
-    const replyText = await generateAiChat(messages);
-
-    // Telegram 4000+ karakter sınırı kontrolü
-    if (replyText.length > 4000) {
-      const chunks = replyText.match(/[\s\S]{1,3900}/g) || [replyText];
-      for (const chunk of chunks) {
-        await ctx.reply(chunk, { reply_to_message_id: ctx.message.message_id });
-      }
-    } else {
-      await ctx.reply(replyText, { reply_to_message_id: ctx.message.message_id });
-    }
+    const answer = await generateAiChat(messages, groupCtx);
+    const chunks = answer.match(/[\s\S]{1,3900}/g) || [answer];
+    for (const chunk of chunks)
+      await ctx.reply(chunk, { reply_to_message_id: ctx.message.message_id });
   } catch (err) {
-    console.error('/ai komut hatası:', err);
-    return ctx.reply('⚠️ Kanka beyin fırtınası yaparken bir aksilik çıktı amk, tekrar dene!', { reply_to_message_id: ctx.message.message_id });
+    console.error('/yapay hatası:', err);
+    ctx.reply('⚠️ Kanka bir şeyler ters gitti amk, tekrar dene!', { reply_to_message_id: ctx.message.message_id });
   }
 });
 
-// ─── Yapay Zeka Görsel Üretim Komutu (/image) ─────────────────────────────────
-bot.command('image', async (ctx) => {
+// ─── Fotoğraf / Video / GIF — Başlıkta /yapay varsa Kimi analizi ──────────────
+bot.on(['photo', 'video', 'animation'], async (ctx) => {
   try {
-    let prompt = ctx.message.text.replace(/^\/image(@\w+)?\s*/i, '').trim();
-    const userId = ctx.from.id;
-    const chatId = ctx.chat.id;
+    const caption = (ctx.message.caption || '').trim();
+    if (!caption.match(/^\/yapay(@\w+)?(\s|$)/i)) return; // Sadece /yapay başlıklı medyaları işle
 
-    if (!prompt) {
-      return ctx.replyWithMarkdown(
-        '⚠️ *Kanka ne görseli oluşturacağımı yazmadın!*\n\n_Örnek kullanım:_\n`/image bana bir baykuş görseli oluştur`',
-        { reply_to_message_id: ctx.message.message_id }
-      );
+    const userQ    = caption.replace(/^\/yapay(@\w+)?\s*/i, '').trim() || null;
+    const groupCtx = buildGroupCtx(ctx);
+    const senderName = groupCtx?.senderName || ctx.from.first_name || 'Kullanıcı';
+    const groupName  = groupCtx?.groupName  || '';
+
+    let fileId = null, mimeType = 'image/jpeg', mediaLabel = 'görsel';
+    if (ctx.message.photo) {
+      fileId = ctx.message.photo.at(-1).file_id;
+    } else if (ctx.message.video) {
+      const thumb = ctx.message.video.thumbnail || ctx.message.video.thumb;
+      if (!thumb) return;
+      fileId = thumb.file_id; mediaLabel = 'video';
+    } else if (ctx.message.animation) {
+      const thumb = ctx.message.animation.thumbnail || ctx.message.animation.thumb;
+      if (!thumb) return;
+      fileId = thumb.file_id; mediaLabel = 'GIF';
     }
+    if (!fileId) return;
 
-    // ─── Cooldown Kontrolü (5 dakika) ──────────────────────────────────────
-    const { onCooldown, remainingMs } = checkImageCooldown(chatId, userId);
-    if (onCooldown) {
-      const remaining = Math.ceil(remainingMs / 1000);
-      const mins = Math.floor(remaining / 60);
-      const secs = remaining % 60;
-      const timeStr = mins > 0 ? `${mins} dakika ${secs} saniye` : `${secs} saniye`;
-      return ctx.replyWithMarkdown(
-        `⏳ *Kanka sakin ol!* Görsel oluşturmak için **${timeStr}** daha beklemen lazım.\n_Spam olmasın diye 5 dakikada 1 görsel oluşturulabilir._`,
-        { reply_to_message_id: ctx.message.message_id }
-      );
-    }
-
-    // ─── Moderasyon Filtresi Kontrolü (+18 / Yasaklı İçerik) ───────────────
-    if (isForbiddenContent(prompt)) {
-      return ctx.replyWithMarkdown(
-        '🔞 *Kanka bu tarz +18 veya yasaklı görseller oluşturamam!*\n\n' +
-        'Düzgün ve kurallara uygun bir görsel iste bakayım. 😉',
-        { reply_to_message_id: ctx.message.message_id }
-      );
-    }
-
-    // Cooldown başlat (istek kabul edildi)
-    setImageCooldown(chatId, userId);
-
-    await ctx.sendChatAction('upload_photo');
-    const waitingMsg = await ctx.reply('🎨 *Görseliniz çiziliyor kanka, bekle biraz...*', {
-      parse_mode: 'Markdown',
-      reply_to_message_id: ctx.message.message_id
-    });
-
-    const imgBuffer = await generateAiImage(prompt);
-
-    await ctx.sendChatAction('upload_photo');
-    await ctx.replyWithPhoto(
-      { source: imgBuffer },
-      {
-        caption: `🎨 *Görselin Hazır Kanka!*\n📝 *İstek:* \`${prompt}\`\n⏳ _Bir sonraki görsel için 5 dakika beklemen lazım._`,
-        parse_mode: 'Markdown',
-        reply_to_message_id: ctx.message.message_id
-      }
+    await ctx.sendChatAction('typing');
+    const buf    = await downloadTgFile(fileId);
+    const result = await analyzeMediaWithKimi(
+      buf.toString('base64'), mimeType,
+      userQ, senderName, groupName, mediaLabel
     );
-
-    // Bekleme mesajını sil
-    if (waitingMsg?.message_id) {
-      ctx.deleteMessage(waitingMsg.message_id).catch(() => {});
-    }
+    const chunks = result.match(/[\s\S]{1,3900}/g) || [result];
+    for (const chunk of chunks)
+      await ctx.reply(chunk, { reply_to_message_id: ctx.message.message_id });
   } catch (err) {
-    console.error('/image komut hatası:', err);
-    // Hata durumunda cooldown'ı sıfırla (kullanıcı tekrar deneyebilsin)
-    resetImageCooldown(ctx.chat.id, ctx.from.id);
-    return ctx.reply(`⚠️ Kanka görsel çizilemedi: ${err.message}`, { reply_to_message_id: ctx.message.message_id });
+    console.error('Medya analiz hatası:', err);
+    ctx.reply('⚠️ Kanka görseli analiz edemedim, tekrar dene!', { reply_to_message_id: ctx.message.message_id });
   }
 });
 
