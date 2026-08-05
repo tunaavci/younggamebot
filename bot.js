@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Telegraf, Markup } = require('telegraf');
 const { getRandomWord } = require('./words');
-const { generateAiChat, generateAiImage, isForbiddenContent } = require('./ai');
+const { generateAiChat, generateAiImage, isForbiddenContent, checkImageCooldown, setImageCooldown, resetImageCooldown } = require('./ai');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
@@ -212,6 +212,8 @@ bot.command('ai', async (ctx) => {
 bot.command('image', async (ctx) => {
   try {
     let prompt = ctx.message.text.replace(/^\/image(@\w+)?\s*/i, '').trim();
+    const userId = ctx.from.id;
+    const chatId = ctx.chat.id;
 
     if (!prompt) {
       return ctx.replyWithMarkdown(
@@ -220,7 +222,20 @@ bot.command('image', async (ctx) => {
       );
     }
 
-    // Moderasyon Filtresi Kontrolü (+18 / Yasaklı İçerik)
+    // ─── Cooldown Kontrolü (5 dakika) ──────────────────────────────────────
+    const { onCooldown, remainingMs } = checkImageCooldown(chatId, userId);
+    if (onCooldown) {
+      const remaining = Math.ceil(remainingMs / 1000);
+      const mins = Math.floor(remaining / 60);
+      const secs = remaining % 60;
+      const timeStr = mins > 0 ? `${mins} dakika ${secs} saniye` : `${secs} saniye`;
+      return ctx.replyWithMarkdown(
+        `⏳ *Kanka sakin ol!* Görsel oluşturmak için **${timeStr}** daha beklemen lazım.\n_Spam olmasın diye 5 dakikada 1 görsel oluşturulabilir._`,
+        { reply_to_message_id: ctx.message.message_id }
+      );
+    }
+
+    // ─── Moderasyon Filtresi Kontrolü (+18 / Yasaklı İçerik) ───────────────
     if (isForbiddenContent(prompt)) {
       return ctx.replyWithMarkdown(
         '🔞 *Kanka bu tarz +18 veya yasaklı görseller oluşturamam!*\n\n' +
@@ -228,6 +243,9 @@ bot.command('image', async (ctx) => {
         { reply_to_message_id: ctx.message.message_id }
       );
     }
+
+    // Cooldown başlat (istek kabul edildi)
+    setImageCooldown(chatId, userId);
 
     await ctx.sendChatAction('upload_photo');
     const waitingMsg = await ctx.reply('🎨 *Görseliniz çiziliyor kanka, bekle biraz...*', {
@@ -241,7 +259,7 @@ bot.command('image', async (ctx) => {
     await ctx.replyWithPhoto(
       { source: imgBuffer },
       {
-        caption: `🎨 *Görselin Hazır Kanka!*\n📝 *İstek:* \`${prompt}\``,
+        caption: `🎨 *Görselin Hazır Kanka!*\n📝 *İstek:* \`${prompt}\`\n⏳ _Bir sonraki görsel için 5 dakika beklemen lazım._`,
         parse_mode: 'Markdown',
         reply_to_message_id: ctx.message.message_id
       }
@@ -253,7 +271,9 @@ bot.command('image', async (ctx) => {
     }
   } catch (err) {
     console.error('/image komut hatası:', err);
-    return ctx.reply('⚠️ Kanka görseli çizerken tuval devrildi amk, tekrar dene!', { reply_to_message_id: ctx.message.message_id });
+    // Hata durumunda cooldown'ı sıfırla (kullanıcı tekrar deneyebilsin)
+    resetImageCooldown(ctx.chat.id, ctx.from.id);
+    return ctx.reply(`⚠️ Kanka görsel çizilemedi: ${err.message}`, { reply_to_message_id: ctx.message.message_id });
   }
 });
 
